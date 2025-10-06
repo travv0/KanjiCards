@@ -99,6 +99,7 @@ class AddonConfig:
     existing_tag: str
     created_tag: str
     dictionary_file: str
+    kanji_deck_name: str
 
 
 class KanjiVocabSyncManager:
@@ -113,6 +114,7 @@ class KanjiVocabSyncManager:
         self._kanji_model_cache: Optional[Dict[str, Any]] = None
         self._vocab_model_cache: Optional[Dict[str, Any]] = None
         self._realtime_error_logged = False
+        self._missing_deck_logged = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -143,6 +145,7 @@ class KanjiVocabSyncManager:
             existing_tag=raw.get("existing_tag", "has_vocab_kanji"),
             created_tag=raw.get("created_tag", "auto_kanji_card"),
             dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
+            kanji_deck_name=raw.get("kanji_deck_name", ""),
         )
 
     def save_config(self, cfg: AddonConfig) -> None:
@@ -158,6 +161,7 @@ class KanjiVocabSyncManager:
             "existing_tag": cfg.existing_tag,
             "created_tag": cfg.created_tag,
             "dictionary_file": cfg.dictionary_file,
+            "kanji_deck_name": cfg.kanji_deck_name,
         }
         self.mw.addonManager.writeConfig(__name__, raw)
         self._dictionary_cache = None
@@ -165,6 +169,7 @@ class KanjiVocabSyncManager:
         self._kanji_model_cache = None
         self._vocab_model_cache = None
         self._realtime_error_logged = False
+        self._missing_deck_logged = False
 
     # ------------------------------------------------------------------
     # UI wiring
@@ -661,6 +666,7 @@ class KanjiVocabSyncManager:
                 kanji_char,
                 cfg.existing_tag,
                 cfg.created_tag,
+                cfg,
             )
             if created_note_id:
                 stats["created"] += 1
@@ -677,6 +683,7 @@ class KanjiVocabSyncManager:
         kanji_char: str,
         existing_tag: str,
         created_tag: str,
+        cfg: AddonConfig,
     ) -> Optional[int]:
         note = _new_note(collection, kanji_model)
         field_names = {logical: kanji_model["flds"][idx]["name"] for logical, idx in field_indexes.items()}
@@ -702,7 +709,7 @@ class KanjiVocabSyncManager:
         for tag in tags:
             _add_tag(note, tag)
 
-        deck_id = self._resolve_deck_id(collection, kanji_model)
+        deck_id = self._resolve_deck_id(collection, kanji_model, cfg)
         if not _add_note(collection, note, deck_id):
             return None
         return getattr(note, "id", None)
@@ -742,13 +749,25 @@ class KanjiVocabSyncManager:
         _unsuspend_cards(collection, to_unsuspend)
         return len(to_unsuspend)
 
-    def _resolve_deck_id(self, collection: Collection, model: NotetypeDict) -> int:
+    def _resolve_deck_id(self, collection: Collection, model: NotetypeDict, cfg: AddonConfig) -> int:
+        if cfg.kanji_deck_name:
+            deck_id = self._lookup_deck_id(collection, cfg.kanji_deck_name)
+            if deck_id:
+                self._missing_deck_logged = False
+                return deck_id
+            if not self._missing_deck_logged:
+                print(
+                    "[KanjiCards] Configured kanji deck '%s' was not found; using fallback"
+                    % cfg.kanji_deck_name
+                )
+                self._missing_deck_logged = True
+
         did = model.get("did")
         if isinstance(did, int) and did > 0:
             return did
 
         decks = collection.decks
-        for attr in ("get_current_id", "current_id", "selected" ):
+        for attr in ("get_current_id", "current_id", "selected"):
             getter = getattr(decks, attr, None)
             if callable(getter):
                 try:
@@ -788,6 +807,37 @@ class KanjiVocabSyncManager:
 
         raise RuntimeError("Unable to determine a deck for new kanji notes")
 
+    def _lookup_deck_id(self, collection: Collection, name: str) -> Optional[int]:
+        decks = collection.decks
+        if not name:
+            return None
+        for attr in ("id_for_name", "idForName", "id"):
+            getter = getattr(decks, attr, None)
+            if callable(getter):
+                try:
+                    deck_id = getter(name)
+                    if isinstance(deck_id, int) and deck_id > 0:
+                        return deck_id
+                except Exception:
+                    continue
+        # Fall back to scanning deck list
+        names = []
+        fetcher = getattr(decks, "all_names_and_ids", None)
+        if callable(fetcher):
+            try:
+                entries = fetcher()
+            except TypeError:
+                entries = None
+            if entries:
+                for entry in entries:
+                    entry_name = getattr(entry, "name", entry[0] if isinstance(entry, (list, tuple)) else None)
+                    entry_id = getattr(entry, "id", entry[1] if isinstance(entry, (list, tuple)) else None)
+                    if entry_name == name and isinstance(entry_id, int) and entry_id > 0:
+                        return entry_id
+                    if entry_name:
+                        names.append(entry_name)
+        return None
+
 
 class KanjiVocabSyncSettingsDialog(QDialog):
     """Settings dialog for configuring the add-on."""
@@ -821,10 +871,13 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.existing_tag_edit = QLineEdit(self.config.existing_tag)
         self.created_tag_edit = QLineEdit(self.config.created_tag)
         self.dictionary_edit = QLineEdit(self.config.dictionary_file)
+        self.deck_combo = QComboBox()
+        self._populate_deck_combo()
 
         form.addRow("Existing kanji tag", self.existing_tag_edit)
         form.addRow("Auto-created kanji tag", self.created_tag_edit)
         form.addRow("Dictionary file", self.dictionary_edit)
+        form.addRow("Kanji deck", self.deck_combo)
 
         self.tabs.addTab(widget, "General")
 
@@ -979,7 +1032,55 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         if not self.config.dictionary_file:
             show_warning("Please provide a dictionary file path.")
             return False
+        deck_name = self.deck_combo.currentData()
+        self.config.kanji_deck_name = deck_name.strip() if isinstance(deck_name, str) else ""
         return True
+
+    def _populate_deck_combo(self) -> None:
+        self.deck_combo.clear()
+        self.deck_combo.addItem("<Use note type/default deck>", "")
+
+        col = self.manager.mw.col
+        if not col:
+            return
+        decks = col.decks
+        deck_names: List[str] = []
+
+        entries = None
+        for attr in ("all_names_and_ids", "allNamesAndIds", "allNames"):
+            getter = getattr(decks, attr, None)
+            if callable(getter):
+                try:
+                    entries = getter()
+                    break
+                except TypeError:
+                    continue
+        if entries is None:
+            entries = []
+
+        if isinstance(entries, list) and entries:
+            for entry in entries:
+                name = None
+                if hasattr(entry, "name"):
+                    name = entry.name
+                elif isinstance(entry, (list, tuple)) and entry:
+                    name = entry[0]
+                if name is None:
+                    continue
+                deck_names.append(str(name))
+        else:
+            # Fall back to legacy API returning list of names
+            for name in entries or []:
+                deck_names.append(str(name))
+
+        for name in sorted(set(deck_names)):
+            self.deck_combo.addItem(name, name)
+
+        current_name = self.config.kanji_deck_name
+        if current_name:
+            index = self.deck_combo.findData(current_name)
+            if index != -1:
+                self.deck_combo.setCurrentIndex(index)
 
     def _persist_kanji_tab(self) -> bool:
         model = self._current_kanji_model()
