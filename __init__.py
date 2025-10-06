@@ -884,7 +884,7 @@ class KanjiVocabSyncManager:
 
         rows = collection.db.all(
             """
-            SELECT cards.id, cards.nid, cards.due, cards.did, notes.flds
+            SELECT cards.id, cards.nid, cards.due, cards.did, cards.mod, cards.usn, notes.flds
             FROM cards
             JOIN notes ON notes.id = cards.nid
             WHERE notes.mid = ? AND cards.queue = 0
@@ -894,8 +894,8 @@ class KanjiVocabSyncManager:
         if not rows:
             return
 
-        entries_by_deck: Dict[int, List[Tuple[Tuple, int, int]]] = {}
-        for card_id, note_id, due_value, deck_id, flds in rows:
+        entries_by_deck: Dict[int, List[Tuple[Tuple, int, int, int, int]]] = {}
+        for card_id, note_id, due_value, deck_id, original_mod, original_usn, flds in rows:
             fields = flds.split("\x1f")
             if kanji_field_index >= len(fields):
                 continue
@@ -912,7 +912,7 @@ class KanjiVocabSyncManager:
                 freq = int(freq_val)
 
             key = self._build_reorder_key(mode, info, freq, due_value, card_id)
-            entries_by_deck.setdefault(deck_id, []).append((key, card_id, due_value))
+            entries_by_deck.setdefault(deck_id, []).append((key, card_id, due_value, original_mod, original_usn))
 
         if not entries_by_deck:
             return
@@ -923,12 +923,14 @@ class KanjiVocabSyncManager:
             if not deck_entries:
                 continue
             deck_entries.sort(key=lambda item: item[0])
-            for position, (key, card_id, original_due) in enumerate(deck_entries):
+            for position, (key, card_id, original_due, original_mod, original_usn) in enumerate(deck_entries):
+                new_mod = now if position != original_due else original_mod
+                new_usn = usn if position != original_due else original_usn
                 collection.db.execute(
                     "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
                     position,
-                    now,
-                    usn,
+                    new_mod,
+                    new_usn,
                     card_id,
                 )
 
