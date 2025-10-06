@@ -111,6 +111,8 @@ class AddonConfig:
     existing_tag: str
     created_tag: str
     bucket_tags: Dict[str, str]
+    only_new_vocab_tag: str
+    no_vocab_tag: str
     dictionary_file: str
     kanji_deck_name: str
     auto_run_on_sync: bool
@@ -262,6 +264,8 @@ class KanjiVocabSyncManager:
             existing_tag=raw.get("existing_tag", "has_vocab_kanji"),
             created_tag=raw.get("created_tag", "auto_kanji_card"),
             bucket_tags=bucket_tags,
+            only_new_vocab_tag=raw.get("only_new_vocab_tag", ""),
+            no_vocab_tag=raw.get("no_vocab_tag", ""),
             dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
             kanji_deck_name=raw.get("kanji_deck_name", ""),
             auto_run_on_sync=raw.get("auto_run_on_sync", False),
@@ -286,6 +290,8 @@ class KanjiVocabSyncManager:
             "existing_tag": cfg.existing_tag,
             "created_tag": cfg.created_tag,
             "bucket_tags": cfg.bucket_tags,
+            "only_new_vocab_tag": cfg.only_new_vocab_tag,
+            "no_vocab_tag": cfg.no_vocab_tag,
             "dictionary_file": cfg.dictionary_file,
             "kanji_deck_name": cfg.kanji_deck_name,
             "auto_run_on_sync": bool(cfg.auto_run_on_sync),
@@ -397,6 +403,7 @@ class KanjiVocabSyncManager:
             kanji_field_indexes,
             kanji_field_index,
             cfg,
+            usage_info,
             existing_notes,
             prune_existing=True,
         )
@@ -491,6 +498,8 @@ class KanjiVocabSyncManager:
 
         existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
 
+        usage_info = self._collect_vocab_usage(collection, list(vocab_map.values()), cfg)
+
         self._apply_kanji_updates(
             collection,
             kanji_chars,
@@ -499,17 +508,17 @@ class KanjiVocabSyncManager:
             kanji_field_indexes,
             kanji_field_index,
             cfg,
+            usage_info,
             existing_notes,
         )
 
         if cfg.reorder_mode in {"frequency", "vocab"}:
-            usage_all = self._collect_vocab_usage(collection, list(vocab_map.values()), cfg)
             self._reorder_new_kanji_cards(
                 collection,
                 kanji_model,
                 kanji_field_index,
                 cfg,
-                usage_all,
+                usage_info,
                 dictionary,
             )
 
@@ -1073,6 +1082,40 @@ class KanjiVocabSyncManager:
                 result.add(note_id)
         return result
 
+    def _update_kanji_status_tags(
+        self,
+        note: Note,
+        cfg: AddonConfig,
+        has_vocab: bool,
+        has_reviewed_vocab: bool,
+    ) -> None:
+        only_new_tag = cfg.only_new_vocab_tag.strip()
+        no_vocab_tag = cfg.no_vocab_tag.strip()
+        desired: Set[str] = set()
+        if only_new_tag and has_vocab and not has_reviewed_vocab:
+            desired.add(only_new_tag)
+        if no_vocab_tag and not has_vocab:
+            desired.add(no_vocab_tag)
+
+        changed = False
+
+        for tag in (only_new_tag, no_vocab_tag):
+            if not tag or tag in desired:
+                continue
+            if _remove_tag_case_insensitive(note, tag):
+                changed = True
+
+        if desired:
+            existing_lower = {tag.lower() for tag in note.tags}
+            for tag in desired:
+                if tag.lower() not in existing_lower:
+                    _add_tag(note, tag)
+                    changed = True
+                    existing_lower.add(tag.lower())
+
+        if changed:
+            note.flush()
+
     def _remove_unused_tags(
         self,
         collection: Collection,
@@ -1080,6 +1123,7 @@ class KanjiVocabSyncManager:
         tag: str,
         unsuspend_tag: str,
         active_chars: Set[str],
+        cfg: AddonConfig,
     ) -> Tuple[int, int]:
         removed = 0
         resuspended_total = 0
@@ -1099,6 +1143,12 @@ class KanjiVocabSyncManager:
                 if resuspended:
                     changed = True
                     resuspended_total += resuspended
+            self._update_kanji_status_tags(
+                note,
+                cfg,
+                has_vocab=False,
+                has_reviewed_vocab=False,
+            )
             if changed:
                 note.flush()
         return removed, resuspended_total
@@ -1278,6 +1328,7 @@ class KanjiVocabSyncManager:
         kanji_field_indexes: Dict[str, int],
         kanji_field_index: int,
         cfg: AddonConfig,
+        usage_info: Optional[Dict[str, KanjiUsageInfo]] = None,
         existing_notes: Optional[Dict[str, int]] = None,
         prune_existing: bool = False,
     ) -> Dict[str, object]:
@@ -1313,6 +1364,7 @@ class KanjiVocabSyncManager:
 
         for kanji_char in unique_chars:
             dictionary_entry = dictionary.get(kanji_char)
+            info = usage_info.get(kanji_char) if usage_info else None
             if kanji_char in existing_notes:
                 note_id = existing_notes[kanji_char]
                 tagged, note = self._ensure_note_tagged(collection, note_id, cfg.existing_tag)
@@ -1324,6 +1376,13 @@ class KanjiVocabSyncManager:
                 if frequency_field_name and isinstance(dictionary_entry, dict):
                     if self._update_frequency_field(note, frequency_field_name, dictionary_entry.get("frequency")):
                         note.flush()
+                if info is not None:
+                    self._update_kanji_status_tags(
+                        note,
+                        cfg,
+                        has_vocab=True,
+                        has_reviewed_vocab=info.reviewed,
+                    )
                 continue
 
             if dictionary_entry is None:
@@ -1343,6 +1402,14 @@ class KanjiVocabSyncManager:
             if created_note_id:
                 stats["created"] += 1
                 existing_notes[kanji_char] = created_note_id
+                if info is not None:
+                    new_note = _get_note(collection, created_note_id)
+                    self._update_kanji_status_tags(
+                        new_note,
+                        cfg,
+                        has_vocab=True,
+                        has_reviewed_vocab=info.reviewed,
+                    )
 
         if prune_existing and cfg.existing_tag:
             removed, resuspended = self._remove_unused_tags(
@@ -1351,6 +1418,7 @@ class KanjiVocabSyncManager:
                 cfg.existing_tag,
                 unsuspend_tag,
                 unique_chars,
+                cfg,
             )
             stats["tag_removed"] = removed
             stats["resuspended"] = resuspended
@@ -1824,6 +1892,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.bucket_reviewed_tag_edit = QLineEdit(self.config.bucket_tags.get("reviewed_vocab", ""))
         self.bucket_unreviewed_tag_edit = QLineEdit(self.config.bucket_tags.get("unreviewed_vocab", ""))
         self.bucket_no_vocab_tag_edit = QLineEdit(self.config.bucket_tags.get("no_vocab", ""))
+        self.only_new_vocab_tag_edit = QLineEdit(self.config.only_new_vocab_tag)
+        self.no_vocab_tag_edit = QLineEdit(self.config.no_vocab_tag)
 
         form.addRow("Existing kanji tag", self.existing_tag_edit)
         form.addRow("Auto-created kanji tag", self.created_tag_edit)
@@ -1839,6 +1909,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         form.addRow("Reviewed vocab bucket tag", self.bucket_reviewed_tag_edit)
         form.addRow("Unreviewed vocab bucket tag", self.bucket_unreviewed_tag_edit)
         form.addRow("No vocab bucket tag", self.bucket_no_vocab_tag_edit)
+        form.addRow("Only-new vocab kanji tag", self.only_new_vocab_tag_edit)
+        form.addRow("No-vocab kanji tag", self.no_vocab_tag_edit)
 
         self.tabs.addTab(widget, "General")
 
@@ -2013,6 +2085,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             "unreviewed_vocab": self.bucket_unreviewed_tag_edit.text().strip(),
             "no_vocab": self.bucket_no_vocab_tag_edit.text().strip(),
         }
+        self.config.only_new_vocab_tag = self.only_new_vocab_tag_edit.text().strip()
+        self.config.no_vocab_tag = self.no_vocab_tag_edit.text().strip()
         return True
 
     def _populate_deck_combo(self) -> None:

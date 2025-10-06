@@ -18,6 +18,8 @@
     "unreviewed_vocab": "",
     "no_vocab": ""
   },
+  "only_new_vocab_tag": "",
+  "no_vocab_tag": "",
   "dictionary_file": "kanjidic2.xml",
   "kanji_deck_name": "",
   "auto_run_on_sync": false,
