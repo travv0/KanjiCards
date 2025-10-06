@@ -40,12 +40,14 @@ from aqt.qt import (
     QVBoxLayout,
 )
 
+# Messaging helpers differ between Qt versions, so prefer new-style names.
 try:
-    from aqt.utils import show_critical, show_info, show_warning
+    from aqt.utils import show_critical, show_info, show_warning, tooltip
 except ImportError:  # Legacy Anki versions
     from aqt.utils import showCritical as show_critical
     from aqt.utils import showInfo as show_info
     from aqt.utils import showWarning as show_warning
+    from aqt.utils import tooltip
 
 try:  # PyQt6-style enums
     SINGLE_SELECTION = QAbstractItemView.SelectionMode.SingleSelection
@@ -236,22 +238,7 @@ class KanjiVocabSyncManager:
             show_critical(f"Kanji Vocab Sync failed:\n{err}")
         else:
             self.mw.progress.finish()
-            lines = [
-                f"Kanji scanned: {stats['kanji_scanned']}",
-                f"Existing notes tagged: {stats['existing_tagged']}",
-                f"New notes created: {stats['created']}",
-            ]
-            if stats["unsuspended"]:
-                lines.append(f"Cards unsuspended: {stats['unsuspended']}")
-            missing = stats.get("missing_dictionary")
-            if missing:
-                missing_preview = ", ".join(sorted(missing)[:10])
-                more = "" if len(missing) <= 10 else ", ..."
-                lines.append(
-                    "Dictionary entries missing: "
-                    f"{len(missing)} (examples: {missing_preview}{more})"
-                )
-            show_info("\n".join(lines))
+            self._notify_summary(stats)
             self.mw.reset()
 
     def _sync_internal(self) -> Dict[str, object]:
@@ -621,6 +608,39 @@ class KanjiVocabSyncManager:
                     value = fields[field_index]
                     reviewed.update(KANJI_PATTERN.findall(value))
         return reviewed
+
+    def _notify_summary(self, stats: Dict[str, object]) -> None:
+        try:
+            scanned = int(stats.get("kanji_scanned", 0))
+        except Exception:
+            scanned = 0
+        created = int(stats.get("created", 0))
+        tagged = int(stats.get("existing_tagged", 0))
+        unsuspended = int(stats.get("unsuspended", 0))
+
+        lines = [
+            f"Scanned: {scanned}",
+            f"Tagged: {tagged}",
+            f"Created: {created}",
+        ]
+        if unsuspended:
+            lines.append(f"Unsuspended: {unsuspended}")
+
+        missing = stats.get("missing_dictionary")
+        if missing:
+            try:
+                missing_list = sorted(missing)
+            except Exception:
+                missing_list = []
+            preview = ", ".join(missing_list[:5]) if missing_list else ""
+            more = "…" if missing_list and len(missing_list) > 5 else ""
+            lines.append(
+                f"Missing dictionary entries: {len(missing_list)}"
+                + (f" ({preview}{more})" if preview else "")
+            )
+
+        message = "<br>".join(lines)
+        tooltip(f"KanjiCards<br>{message}", parent=self.mw, period=5000)
 
     def _index_existing_kanji_notes(
         self,
@@ -1128,7 +1148,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
 
         iterable = entries if isinstance(entries, list) else list(entries or [])
         for entry in iterable:
-            name = self._deck_entry_name(entry)
+            name = self.manager._deck_entry_name(entry)
             if name:
                 deck_names.append(name)
 
