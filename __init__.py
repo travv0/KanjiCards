@@ -108,6 +108,7 @@ class AddonConfig:
     realtime_review: bool
     unsuspended_tag: str
     reorder_mode: str
+    ignore_suspended_vocab: bool
 
 
 @dataclass
@@ -168,7 +169,8 @@ class KanjiVocabSyncManager:
             auto_run_on_sync=raw.get("auto_run_on_sync", False),
             realtime_review=raw.get("realtime_review", True),
             unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
-            reorder_mode=raw.get("reorder_mode", "frequency"),
+            reorder_mode=raw.get("reorder_mode", "vocab"),
+            ignore_suspended_vocab=raw.get("ignore_suspended_vocab", False),
         )
 
     def save_config(self, cfg: AddonConfig) -> None:
@@ -189,6 +191,7 @@ class KanjiVocabSyncManager:
             "realtime_review": bool(cfg.realtime_review),
             "unsuspended_tag": cfg.unsuspended_tag,
             "reorder_mode": cfg.reorder_mode,
+            "ignore_suspended_vocab": bool(cfg.ignore_suspended_vocab),
         }
         self.mw.addonManager.writeConfig(__name__, raw)
         self._dictionary_cache = None
@@ -277,7 +280,7 @@ class KanjiVocabSyncManager:
 
         dictionary = self._load_dictionary(cfg.dictionary_file)
 
-        usage_info = self._collect_vocab_usage(collection, vocab_models)
+        usage_info = self._collect_vocab_usage(collection, vocab_models, cfg)
         active_chars = set(usage_info.keys())
 
         existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
@@ -386,7 +389,7 @@ class KanjiVocabSyncManager:
         )
 
         if cfg.reorder_mode in {"frequency", "vocab"}:
-            usage_all = self._collect_vocab_usage(collection, list(vocab_map.values()))
+            usage_all = self._collect_vocab_usage(collection, list(vocab_map.values()), cfg)
             self._reorder_new_kanji_cards(
                 collection,
                 kanji_model,
@@ -679,6 +682,7 @@ class KanjiVocabSyncManager:
         self,
         collection: Collection,
         vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
+        cfg: AddonConfig,
     ) -> Dict[str, KanjiUsageInfo]:
         usage: Dict[str, KanjiUsageInfo] = {}
         review_order = 0
@@ -686,14 +690,20 @@ class KanjiVocabSyncManager:
         for model, field_indexes in vocab_models:
             if not field_indexes:
                 continue
+            ignore_suspended = cfg.ignore_suspended_vocab
+            reviewed_case = "cards.reps > 0"
+            join_clause = "JOIN cards ON cards.nid = notes.id"
+            if ignore_suspended:
+                reviewed_case += " AND cards.queue != -1"
+                join_clause += " AND cards.queue != -1"
             rows = collection.db.all(
-                """
+                f"""
                 SELECT notes.id,
                        notes.flds,
-                       MAX(CASE WHEN cards.reps > 0 THEN 1 ELSE 0 END) AS has_reviewed,
+                       MAX(CASE WHEN {reviewed_case} THEN 1 ELSE 0 END) AS has_reviewed,
                        MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due
                 FROM notes
-                JOIN cards ON cards.nid = notes.id
+                {join_clause}
                 WHERE notes.mid = ?
                 GROUP BY notes.id
                 """,
@@ -1260,10 +1270,12 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.realtime_check.setChecked(self.config.realtime_review)
         self.auto_sync_check = QCheckBox("Run automatically after sync")
         self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
+        self.ignore_suspended_check = QCheckBox("Ignore suspended vocab cards")
+        self.ignore_suspended_check.setChecked(self.config.ignore_suspended_vocab)
         self.reorder_combo = QComboBox()
         self.reorder_combo.addItem("Frequency (KANJIDIC)", "frequency")
         self.reorder_combo.addItem("Vocabulary order", "vocab")
-        current_mode = self.config.reorder_mode if self.config.reorder_mode in {"frequency", "vocab"} else "frequency"
+        current_mode = self.config.reorder_mode if self.config.reorder_mode in {"frequency", "vocab"} else "vocab"
         index = self.reorder_combo.findData(current_mode)
         if index >= 0:
             self.reorder_combo.setCurrentIndex(index)
@@ -1275,6 +1287,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         form.addRow("Kanji deck", self.deck_combo)
         form.addRow("", self.realtime_check)
         form.addRow("", self.auto_sync_check)
+        form.addRow("", self.ignore_suspended_check)
         form.addRow("Order new kanji cards", self.reorder_combo)
 
         self.tabs.addTab(widget, "General")
@@ -1435,7 +1448,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.config.unsuspended_tag = self.unsuspend_tag_edit.text().strip()
         self.config.realtime_review = self.realtime_check.isChecked()
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
-        self.config.reorder_mode = self.reorder_combo.currentData() or "frequency"
+        self.config.ignore_suspended_vocab = self.ignore_suspended_check.isChecked()
+        self.config.reorder_mode = self.reorder_combo.currentData() or "vocab"
         return True
 
     def _populate_deck_combo(self) -> None:
