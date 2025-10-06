@@ -690,7 +690,7 @@ class KanjiVocabSyncManager:
                 """
                 SELECT notes.id,
                        notes.flds,
-                       MAX(CASE WHEN cards.queue != 0 THEN 1 ELSE 0 END) AS has_reviewed,
+                       MAX(CASE WHEN cards.reps > 0 THEN 1 ELSE 0 END) AS has_reviewed,
                        MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due
                 FROM notes
                 JOIN cards ON cards.nid = notes.id
