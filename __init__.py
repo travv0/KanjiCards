@@ -871,7 +871,6 @@ class KanjiVocabSyncManager:
                 except Exception:
                     continue
         # Fall back to scanning deck list
-        names = []
         fetcher = getattr(decks, "all_names_and_ids", None)
         if callable(fetcher):
             try:
@@ -880,13 +879,28 @@ class KanjiVocabSyncManager:
                 entries = None
             if entries:
                 for entry in entries:
-                    entry_name = getattr(entry, "name", entry[0] if isinstance(entry, (list, tuple)) else None)
-                    entry_id = getattr(entry, "id", entry[1] if isinstance(entry, (list, tuple)) else None)
+                    entry_name = self._deck_entry_name(entry)
+                    entry_id = getattr(entry, "id", None)
+                    if entry_id is None and isinstance(entry, (list, tuple)):
+                        entry_id = next((item for item in entry if isinstance(item, int)), None)
                     if entry_name == name and isinstance(entry_id, int) and entry_id > 0:
                         return entry_id
-                    if entry_name:
-                        names.append(entry_name)
         return None
+
+    def _deck_entry_name(self, entry: Any) -> Optional[str]:
+        if entry is None:
+            return None
+        if hasattr(entry, "name"):
+            candidate = entry.name
+        elif isinstance(entry, (list, tuple)):
+            candidate = next((item for item in entry if isinstance(item, str)), None)
+        elif isinstance(entry, str):
+            candidate = entry
+        else:
+            candidate = None
+        if not candidate:
+            return None
+        return str(candidate)
 
 
 class KanjiVocabSyncSettingsDialog(QDialog):
@@ -1112,20 +1126,11 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         if entries is None:
             entries = []
 
-        if isinstance(entries, list) and entries:
-            for entry in entries:
-                name = None
-                if hasattr(entry, "name"):
-                    name = entry.name
-                elif isinstance(entry, (list, tuple)) and entry:
-                    name = entry[0]
-                if name is None:
-                    continue
-                deck_names.append(str(name))
-        else:
-            # Fall back to legacy API returning list of names
-            for name in entries or []:
-                deck_names.append(str(name))
+        iterable = entries if isinstance(entries, list) else list(entries or [])
+        for entry in iterable:
+            name = self._deck_entry_name(entry)
+            if name:
+                deck_names.append(name)
 
         for name in sorted(set(deck_names)):
             self.deck_combo.addItem(name, name)
