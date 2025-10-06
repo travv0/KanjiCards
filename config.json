@@ -15,5 +15,6 @@
   "dictionary_file": "kanjidic2.xml",
   "kanji_deck_name": "",
   "auto_run_on_sync": false,
-  "realtime_review": true
+  "realtime_review": true,
+  "unsuspended_tag": "kanjicards_unsuspended"
 }

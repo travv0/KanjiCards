@@ -106,6 +106,7 @@ class AddonConfig:
     kanji_deck_name: str
     auto_run_on_sync: bool
     realtime_review: bool
+    unsuspended_tag: str
 
 
 class KanjiVocabSyncManager:
@@ -157,6 +158,7 @@ class KanjiVocabSyncManager:
             kanji_deck_name=raw.get("kanji_deck_name", ""),
             auto_run_on_sync=raw.get("auto_run_on_sync", False),
             realtime_review=raw.get("realtime_review", True),
+            unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
         )
 
     def save_config(self, cfg: AddonConfig) -> None:
@@ -175,6 +177,7 @@ class KanjiVocabSyncManager:
             "kanji_deck_name": cfg.kanji_deck_name,
             "auto_run_on_sync": bool(cfg.auto_run_on_sync),
             "realtime_review": bool(cfg.realtime_review),
+            "unsuspended_tag": cfg.unsuspended_tag,
         }
         self.mw.addonManager.writeConfig(__name__, raw)
         self._dictionary_cache = None
@@ -387,7 +390,7 @@ class KanjiVocabSyncManager:
             trigger()
 
     def _stats_warrant_sync(self, stats: Dict[str, object]) -> bool:
-        for key in ("created", "existing_tagged", "unsuspended", "tag_removed"):
+        for key in ("created", "existing_tagged", "unsuspended", "tag_removed", "resuspended"):
             try:
                 if int(stats.get(key, 0)) > 0:
                     return True
@@ -657,6 +660,7 @@ class KanjiVocabSyncManager:
         tagged = int(stats.get("existing_tagged", 0))
         unsuspended = int(stats.get("unsuspended", 0))
         removed = int(stats.get("tag_removed", 0))
+        resuspended = int(stats.get("resuspended", 0))
 
         lines = [
             f"Scanned: {scanned}",
@@ -666,7 +670,9 @@ class KanjiVocabSyncManager:
         if unsuspended:
             lines.append(f"Unsuspended: {unsuspended}")
         if removed:
-            lines.append(f"Tag removed: {removed}")
+            lines.append(f"Tags removed: {removed}")
+        if resuspended:
+            lines.append(f"Resuspended: {resuspended}")
 
         missing = stats.get("missing_dictionary")
         if missing:
@@ -733,19 +739,30 @@ class KanjiVocabSyncManager:
         collection: Collection,
         existing_notes: Dict[str, int],
         tag: str,
+        unsuspend_tag: str,
         active_chars: Set[str],
-    ) -> int:
+    ) -> Tuple[int, int]:
         removed = 0
+        resuspended_total = 0
         for kanji_char, note_id in existing_notes.items():
             if kanji_char in active_chars:
                 continue
             note = _get_note(collection, note_id)
-            if tag not in note.tags:
-                continue
-            _remove_tag(note, tag)
-            note.flush()
-            removed += 1
-        return removed
+            changed = False
+            if tag in note.tags:
+                _remove_tag(note, tag)
+                changed = True
+                removed += 1
+            resuspended = 0
+            if unsuspend_tag and unsuspend_tag in note.tags:
+                _remove_tag(note, unsuspend_tag)
+                resuspended = _resuspend_note_cards(collection, note)
+                if resuspended:
+                    changed = True
+                    resuspended_total += resuspended
+            if changed:
+                note.flush()
+        return removed, resuspended_total
 
     def _apply_kanji_updates(
         self,
@@ -767,6 +784,7 @@ class KanjiVocabSyncManager:
             "unsuspended": 0,
             "missing_dictionary": set(),
             "tag_removed": 0,
+            "resuspended": 0,
         }
 
         if not unique_chars:
@@ -775,13 +793,15 @@ class KanjiVocabSyncManager:
         if existing_notes is None:
             existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
 
+        unsuspend_tag = cfg.unsuspended_tag
+
         for kanji_char in unique_chars:
             if kanji_char in existing_notes:
                 note_id = existing_notes[kanji_char]
                 tagged, note = self._ensure_note_tagged(collection, note_id, cfg.existing_tag)
                 if tagged:
                     stats["existing_tagged"] += 1
-                unsuspended = self._unsuspend_note_cards_if_needed(collection, note)
+                unsuspended = self._unsuspend_note_cards_if_needed(collection, note, unsuspend_tag)
                 if unsuspended:
                     stats["unsuspended"] += unsuspended
                 continue
@@ -806,12 +826,15 @@ class KanjiVocabSyncManager:
                 existing_notes[kanji_char] = created_note_id
 
         if prune_existing and cfg.existing_tag:
-            stats["tag_removed"] = self._remove_unused_tags(
+            removed, resuspended = self._remove_unused_tags(
                 collection,
                 existing_notes,
                 cfg.existing_tag,
+                unsuspend_tag,
                 unique_chars,
             )
+            stats["tag_removed"] = removed
+            stats["resuspended"] = resuspended
 
         return stats
 
@@ -865,7 +888,12 @@ class KanjiVocabSyncManager:
             return "; ".join(str(item) for item in value if item)
         return str(value or "")
 
-    def _unsuspend_note_cards_if_needed(self, collection: Collection, note: Note) -> int:
+    def _unsuspend_note_cards_if_needed(
+        self,
+        collection: Collection,
+        note: Note,
+        unsuspend_tag: str,
+    ) -> int:
         leech_tag = "leech"
         try:
             col_conf = collection.conf
@@ -888,6 +916,13 @@ class KanjiVocabSyncManager:
             return 0
 
         _unsuspend_cards(collection, to_unsuspend)
+
+        changed = False
+        if unsuspend_tag and unsuspend_tag not in note.tags:
+            _add_tag(note, unsuspend_tag)
+            changed = True
+        if changed:
+            note.flush()
         return len(to_unsuspend)
 
     def _resolve_deck_id(self, collection: Collection, model: NotetypeDict, cfg: AddonConfig) -> int:
@@ -1026,6 +1061,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.existing_tag_edit = QLineEdit(self.config.existing_tag)
         self.created_tag_edit = QLineEdit(self.config.created_tag)
         self.dictionary_edit = QLineEdit(self.config.dictionary_file)
+        self.unsuspend_tag_edit = QLineEdit(self.config.unsuspended_tag)
         self.deck_combo = QComboBox()
         self._populate_deck_combo()
         self.realtime_check = QCheckBox("Update during reviews")
@@ -1036,6 +1072,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         form.addRow("Existing kanji tag", self.existing_tag_edit)
         form.addRow("Auto-created kanji tag", self.created_tag_edit)
         form.addRow("Dictionary file", self.dictionary_edit)
+        form.addRow("Unsuspended tag", self.unsuspend_tag_edit)
         form.addRow("Kanji deck", self.deck_combo)
         form.addRow("", self.realtime_check)
         form.addRow("", self.auto_sync_check)
@@ -1195,6 +1232,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             return False
         deck_name = self.deck_combo.currentData()
         self.config.kanji_deck_name = deck_name.strip() if isinstance(deck_name, str) else ""
+        self.config.unsuspended_tag = self.unsuspend_tag_edit.text().strip()
         self.config.realtime_review = self.realtime_check.isChecked()
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
         return True
@@ -1407,6 +1445,32 @@ def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> None:
         f"UPDATE cards SET mod = ?, usn = ?, queue = type WHERE id IN ({placeholders})",
         params,
     )
+
+
+def _resuspend_note_cards(collection: Collection, note: Note) -> int:
+    card_rows = collection.db.all(
+        "SELECT id, queue FROM cards WHERE nid = ?",
+        note.id,
+    )
+    to_suspend = [card_id for card_id, queue in card_rows if queue != -1]
+    if not to_suspend:
+        return 0
+
+    sched = getattr(collection, "sched", None)
+    if sched is not None:
+        for attr in ("suspend_cards", "suspendCards"):
+            func = getattr(sched, attr, None)
+            if callable(func):
+                func(list(to_suspend))
+                return len(to_suspend)
+
+    placeholders = ",".join("?" for _ in to_suspend)
+    params: List[object] = [intTime(), collection.usn()] + list(to_suspend)
+    collection.db.execute(
+        f"UPDATE cards SET mod = ?, usn = ?, queue = -1 WHERE id IN ({placeholders})",
+        params,
+    )
+    return len(to_suspend)
 
 
 def _new_note(collection: Collection, model: NotetypeDict) -> Note:
