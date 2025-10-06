@@ -105,6 +105,7 @@ class AddonConfig:
     dictionary_file: str
     kanji_deck_name: str
     auto_run_on_sync: bool
+    realtime_review: bool
 
 
 class KanjiVocabSyncManager:
@@ -155,6 +156,7 @@ class KanjiVocabSyncManager:
             dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
             kanji_deck_name=raw.get("kanji_deck_name", ""),
             auto_run_on_sync=raw.get("auto_run_on_sync", False),
+            realtime_review=raw.get("realtime_review", True),
         )
 
     def save_config(self, cfg: AddonConfig) -> None:
@@ -172,6 +174,7 @@ class KanjiVocabSyncManager:
             "dictionary_file": cfg.dictionary_file,
             "kanji_deck_name": cfg.kanji_deck_name,
             "auto_run_on_sync": bool(cfg.auto_run_on_sync),
+            "realtime_review": bool(cfg.realtime_review),
         }
         self.mw.addonManager.writeConfig(__name__, raw)
         self._dictionary_cache = None
@@ -296,6 +299,8 @@ class KanjiVocabSyncManager:
 
         cfg = self.load_config()
         if not cfg.vocab_note_types:
+            return
+        if not cfg.realtime_review:
             return
 
         try:
@@ -990,6 +995,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.dictionary_edit = QLineEdit(self.config.dictionary_file)
         self.deck_combo = QComboBox()
         self._populate_deck_combo()
+        self.realtime_check = QCheckBox("Update during reviews")
+        self.realtime_check.setChecked(self.config.realtime_review)
         self.auto_sync_check = QCheckBox("Run automatically after sync")
         self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
 
@@ -997,6 +1004,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         form.addRow("Auto-created kanji tag", self.created_tag_edit)
         form.addRow("Dictionary file", self.dictionary_edit)
         form.addRow("Kanji deck", self.deck_combo)
+        form.addRow("", self.realtime_check)
         form.addRow("", self.auto_sync_check)
 
         self.tabs.addTab(widget, "General")
@@ -1154,6 +1162,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             return False
         deck_name = self.deck_combo.currentData()
         self.config.kanji_deck_name = deck_name.strip() if isinstance(deck_name, str) else ""
+        self.config.realtime_review = self.realtime_check.isChecked()
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
         return True
 
