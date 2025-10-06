@@ -892,7 +892,7 @@ class KanjiVocabSyncManager:
         if not rows:
             return
 
-        entries_by_deck: Dict[int, List[Tuple[Tuple, int, int, int, int]]] = {}
+        entries: List[Tuple[Tuple, int, int, int, int]] = []
         for card_id, note_id, due_value, deck_id, original_mod, original_usn, flds in rows:
             fields = flds.split("\x1f")
             if kanji_field_index >= len(fields):
@@ -910,30 +910,24 @@ class KanjiVocabSyncManager:
                 freq = int(freq_val)
 
             key = self._build_reorder_key(mode, info, freq, due_value, card_id)
-            entries_by_deck.setdefault(deck_id, []).append((key, card_id, due_value, original_mod, original_usn))
+            entries.append((key, card_id, due_value, original_mod, original_usn))
 
-        if not entries_by_deck:
+        if not entries:
             return
 
         now = intTime()
         usn = collection.usn()
-        for deck_id, deck_entries in entries_by_deck.items():
-            if not deck_entries:
-                continue
-            deck_entries.sort(key=lambda item: item[0])
-            original_dues = [original_due for _, _, original_due, _, _ in deck_entries if isinstance(original_due, int)]
-            base_due = min(original_dues) if original_dues else 0
-            for offset, (key, card_id, original_due, original_mod, original_usn) in enumerate(deck_entries):
-                new_due = base_due + offset
-                new_mod = now if new_due != original_due else original_mod
-                new_usn = usn if new_due != original_due else original_usn
-                collection.db.execute(
-                    "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
-                    new_due,
-                    new_mod,
-                    new_usn,
-                    card_id,
-                )
+        entries.sort(key=lambda item: item[0])
+        for new_due, (key, card_id, original_due, original_mod, original_usn) in enumerate(entries):
+            new_mod = now if new_due != original_due else original_mod
+            new_usn = usn if new_due != original_due else original_usn
+            collection.db.execute(
+                "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
+                new_due,
+                new_mod,
+                new_usn,
+                card_id,
+            )
 
     def _build_reorder_key(
         self,
