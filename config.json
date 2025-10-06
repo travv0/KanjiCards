@@ -1,0 +1,16 @@
+{
+  "vocab_note_types": [],
+  "kanji_note_type": {
+    "name": "",
+    "fields": {
+      "kanji": "",
+      "definition": "",
+      "stroke_count": "",
+      "kunyomi": "",
+      "onyomi": ""
+    }
+  },
+  "existing_tag": "has_vocab_kanji",
+  "created_tag": "auto_kanji_card",
+  "dictionary_file": "kanjidic2.xml"
+}

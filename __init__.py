@@ -1,0 +1,970 @@
+"""Kanji Vocab Sync Add-on.
+
+This add-on inspects configured vocabulary notes that the user has reviewed
+and ensures each kanji found in those notes has a corresponding kanji card.
+Existing kanji cards receive a configurable tag, and missing ones are created
+automatically using dictionary data and tagged accordingly.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Set, Tuple
+
+from anki.collection import Collection
+from anki.models import NotetypeDict
+from anki.notes import Note
+from anki.utils import intTime
+from aqt import gui_hooks, mw
+from aqt.qt import (
+    QAbstractItemView,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QTabWidget,
+    Qt,
+    QWidget,
+    QVBoxLayout,
+)
+
+try:
+    from aqt.utils import show_critical, show_info, show_warning
+except ImportError:  # Legacy Anki versions
+    from aqt.utils import showCritical as show_critical
+    from aqt.utils import showInfo as show_info
+    from aqt.utils import showWarning as show_warning
+
+try:  # PyQt6-style enums
+    SINGLE_SELECTION = QAbstractItemView.SelectionMode.SingleSelection
+    NO_SELECTION = QAbstractItemView.SelectionMode.NoSelection
+except AttributeError:  # PyQt5 fallback
+    SINGLE_SELECTION = QAbstractItemView.SingleSelection
+    NO_SELECTION = QAbstractItemView.NoSelection
+
+try:
+    ITEM_IS_USER_CHECKABLE = Qt.ItemFlag.ItemIsUserCheckable
+    CHECKED_STATE = Qt.CheckState.Checked
+    UNCHECKED_STATE = Qt.CheckState.Unchecked
+    USER_ROLE = Qt.ItemDataRole.UserRole
+except AttributeError:
+    ITEM_IS_USER_CHECKABLE = Qt.ItemIsUserCheckable
+    CHECKED_STATE = Qt.Checked
+    UNCHECKED_STATE = Qt.Unchecked
+    USER_ROLE = Qt.UserRole
+
+try:
+    DIALOG_ACCEPTED = QDialog.DialogCode.Accepted
+    DIALOG_REJECTED = QDialog.DialogCode.Rejected
+except AttributeError:
+    DIALOG_ACCEPTED = QDialog.Accepted
+    DIALOG_REJECTED = QDialog.Rejected
+
+try:
+    BUTTON_OK = QDialogButtonBox.StandardButton.Ok
+    BUTTON_CANCEL = QDialogButtonBox.StandardButton.Cancel
+except AttributeError:
+    BUTTON_OK = QDialogButtonBox.Ok
+    BUTTON_CANCEL = QDialogButtonBox.Cancel
+
+KANJI_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]")
+
+
+@dataclass
+class VocabNoteTypeConfig:
+    name: str
+    fields: List[str] = field(default_factory=list)
+
+
+@dataclass
+class KanjiNoteTypeConfig:
+    name: str
+    fields: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class AddonConfig:
+    vocab_note_types: List[VocabNoteTypeConfig]
+    kanji_note_type: KanjiNoteTypeConfig
+    existing_tag: str
+    created_tag: str
+    dictionary_file: str
+
+
+class KanjiVocabSyncManager:
+    """Core coordinator for the Kanji Vocab Sync add-on."""
+
+    def __init__(self) -> None:
+        if not mw:
+            raise RuntimeError("Kanji Vocab Sync requires Anki main window")
+        self.mw = mw
+        self.addon_name = self.mw.addonManager.addonFromModule(__name__)
+        if self.addon_name:
+            self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
+        else:
+            # Fallback for development environments where the addon manager does not know the module.
+            self.addon_dir = os.path.dirname(__file__)
+        self._ensure_menu_actions()
+        self.mw.addonManager.setConfigAction(__name__, self.show_settings)
+
+    # ------------------------------------------------------------------
+    # Configuration helpers
+    # ------------------------------------------------------------------
+    def load_config(self) -> AddonConfig:
+        raw = self.mw.addonManager.getConfig(__name__) or {}
+        vocab_cfg = [
+            VocabNoteTypeConfig(name=item.get("note_type", ""), fields=item.get("fields", []) or [])
+            for item in raw.get("vocab_note_types", [])
+        ]
+        kanji_cfg_raw = raw.get("kanji_note_type", {})
+        kanji_cfg = KanjiNoteTypeConfig(
+            name=kanji_cfg_raw.get("name", ""),
+            fields=kanji_cfg_raw.get("fields", {}),
+        )
+        return AddonConfig(
+            vocab_note_types=vocab_cfg,
+            kanji_note_type=kanji_cfg,
+            existing_tag=raw.get("existing_tag", "has_vocab_kanji"),
+            created_tag=raw.get("created_tag", "auto_kanji_card"),
+            dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
+        )
+
+    def save_config(self, cfg: AddonConfig) -> None:
+        raw = {
+            "vocab_note_types": [
+                {"note_type": item.name, "fields": item.fields}
+                for item in cfg.vocab_note_types
+            ],
+            "kanji_note_type": {
+                "name": cfg.kanji_note_type.name,
+                "fields": cfg.kanji_note_type.fields,
+            },
+            "existing_tag": cfg.existing_tag,
+            "created_tag": cfg.created_tag,
+            "dictionary_file": cfg.dictionary_file,
+        }
+        self.mw.addonManager.writeConfig(__name__, raw)
+
+    # ------------------------------------------------------------------
+    # UI wiring
+    # ------------------------------------------------------------------
+    def _ensure_menu_actions(self) -> None:
+        menu = self.mw.form.menuTools
+        sync_action = menu.addAction("Sync Kanji Cards with Vocab")
+        sync_action.triggered.connect(self.run_sync)
+        self._sync_action = sync_action
+
+        settings_action = menu.addAction("Kanji Vocab Sync Settings")
+        settings_action.triggered.connect(self.show_settings)
+        self._settings_action = settings_action
+
+    def show_settings(self) -> None:
+        dialog = KanjiVocabSyncSettingsDialog(self, self.load_config())
+        dialog.exec()
+
+    # ------------------------------------------------------------------
+    # Sync routine
+    # ------------------------------------------------------------------
+    def run_sync(self) -> None:
+        self.mw.checkpoint("Kanji Vocab Sync")
+        self.mw.progress.start(label="Scanning reviewed vocabulary notes...", immediate=True)
+        try:
+            stats = self._sync_internal()
+        except Exception as err:  # noqa: BLE001
+            self.mw.progress.finish()
+            show_critical(f"Kanji Vocab Sync failed:\n{err}")
+        else:
+            self.mw.progress.finish()
+            lines = [
+                f"Kanji scanned: {stats['kanji_scanned']}",
+                f"Existing notes tagged: {stats['existing_tagged']}",
+                f"New notes created: {stats['created']}",
+            ]
+            if stats["unsuspended"]:
+                lines.append(f"Cards unsuspended: {stats['unsuspended']}")
+            missing = stats.get("missing_dictionary")
+            if missing:
+                missing_preview = ", ".join(sorted(missing)[:10])
+                more = "" if len(missing) <= 10 else ", ..."
+                lines.append(
+                    "Dictionary entries missing: "
+                    f"{len(missing)} (examples: {missing_preview}{more})"
+                )
+            show_info("\n".join(lines))
+            self.mw.reset()
+
+    def _sync_internal(self) -> Dict[str, object]:
+        cfg = self.load_config()
+        collection = self.mw.col
+        if collection is None:
+            raise RuntimeError("Collection not available")
+
+        if not cfg.kanji_note_type.name:
+            raise RuntimeError("Kanji note type is not configured yet")
+
+        kanji_model = collection.models.byName(cfg.kanji_note_type.name)
+        if kanji_model is None:
+            raise RuntimeError(f"Kanji note type '{cfg.kanji_note_type.name}' was not found")
+        kanji_field_indexes = self._resolve_field_indexes(kanji_model, cfg.kanji_note_type.fields)
+        kanji_field_name = cfg.kanji_note_type.fields.get("kanji", "")
+        if not kanji_field_name:
+            raise RuntimeError("Kanji field mapping is missing in the Kanji note configuration")
+        kanji_field_index = kanji_field_indexes.get("kanji")
+        if kanji_field_index is None:
+            raise RuntimeError(f"Kanji field '{kanji_field_name}' was not found in note type '{kanji_model['name']}'")
+
+        vocab_models = self._resolve_vocab_models(collection, cfg)
+        if not vocab_models:
+            raise RuntimeError("No valid vocabulary note types configured")
+
+        dictionary = self._load_dictionary(cfg.dictionary_file)
+
+        reviewed_kanji = self._collect_reviewed_kanji(collection, vocab_models)
+
+        existing_notes = self._index_existing_kanji_notes(collection, kanji_model, kanji_field_index)
+
+        stats = {
+            "kanji_scanned": len(reviewed_kanji),
+            "existing_tagged": 0,
+            "created": 0,
+            "unsuspended": 0,
+            "missing_dictionary": set(),
+        }
+
+        for kanji_char in reviewed_kanji:
+            if kanji_char in existing_notes:
+                note_id = existing_notes[kanji_char]
+                tagged, note = self._ensure_note_tagged(collection, note_id, cfg.existing_tag)
+                if tagged:
+                    stats["existing_tagged"] += 1
+                unsuspended = self._unsuspend_note_cards_if_needed(collection, note)
+                if unsuspended:
+                    stats["unsuspended"] += unsuspended
+                continue
+
+            dictionary_entry = dictionary.get(kanji_char)
+            if dictionary_entry is None:
+                stats["missing_dictionary"].add(kanji_char)
+                continue
+
+            if self._create_kanji_note(
+                collection,
+                kanji_model,
+                kanji_field_indexes,
+                dictionary_entry,
+                kanji_char,
+                cfg.existing_tag,
+                cfg.created_tag,
+            ):
+                stats["created"] += 1
+
+        return stats
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _resolve_field_indexes(
+        self,
+        model: NotetypeDict,
+        mapping: Dict[str, str],
+    ) -> Dict[str, int]:
+        name_to_index = {fld["name"]: idx for idx, fld in enumerate(model["flds"])}
+        result: Dict[str, int] = {}
+        for logical_name, field_name in mapping.items():
+            if not field_name:
+                continue
+            if field_name not in name_to_index:
+                raise RuntimeError(
+                    f"Field '{field_name}' configured for '{logical_name}' does not exist in note type '{model['name']}'"
+                )
+            result[logical_name] = name_to_index[field_name]
+        return result
+
+    def _resolve_vocab_models(
+        self,
+        collection: Collection,
+        cfg: AddonConfig,
+    ) -> List[Tuple[NotetypeDict, List[int]]]:
+        vocab_models: List[Tuple[NotetypeDict, List[int]]] = []
+        for vocab_cfg in cfg.vocab_note_types:
+            if not vocab_cfg.name:
+                continue
+            model = collection.models.byName(vocab_cfg.name)
+            if model is None:
+                continue
+            field_indexes = []
+            name_to_index = {fld["name"]: idx for idx, fld in enumerate(model["flds"])}
+            fields_missing = [f for f in vocab_cfg.fields if f not in name_to_index]
+            if fields_missing:
+                continue
+            for fname in vocab_cfg.fields:
+                field_indexes.append(name_to_index[fname])
+            vocab_models.append((model, field_indexes))
+        return vocab_models
+
+    def _load_dictionary(self, file_name: str) -> Dict[str, Dict[str, object]]:
+        if not file_name:
+            raise RuntimeError("Dictionary file path is not configured")
+        path = file_name
+        if not os.path.isabs(path):
+            path = os.path.join(self.addon_dir, path)
+        if not os.path.exists(path):
+            raise RuntimeError(f"Dictionary file not found at '{path}'")
+        lower_path = path.lower()
+        if lower_path.endswith(".json"):
+            return self._load_dictionary_json(path)
+        if lower_path.endswith(".xml"):
+            return self._load_dictionary_kanjidic(path)
+
+        # Fallback: attempt XML first, then JSON
+        try:
+            return self._load_dictionary_kanjidic(path)
+        except Exception:
+            return self._load_dictionary_json(path)
+
+    def _load_dictionary_json(self, path: str) -> Dict[str, Dict[str, object]]:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if not isinstance(data, dict):
+            raise RuntimeError("Dictionary file must contain a JSON object mapping kanji to data")
+        return data
+
+    def _load_dictionary_kanjidic(self, path: str) -> Dict[str, Dict[str, object]]:
+        try:
+            tree = ET.parse(path)
+        except ET.ParseError as err:
+            raise RuntimeError(
+                "Dictionary XML could not be parsed; ensure it is a valid KANJIDIC2 file"
+            ) from err
+        root = tree.getroot()
+        if root is None or root.tag != "kanjidic2":
+            raise RuntimeError("Dictionary XML does not appear to be a KANJIDIC2 file")
+
+        dictionary: Dict[str, Dict[str, object]] = {}
+        for character in root.findall("character"):
+            literal = (character.findtext("literal") or "").strip()
+            if not literal:
+                continue
+
+            misc = character.find("misc")
+            stroke_value = ""
+            if misc is not None:
+                stroke_el = misc.find("stroke_count")
+                if stroke_el is not None and stroke_el.text:
+                    stroke_text = stroke_el.text.strip()
+                    if stroke_text.isdigit():
+                        stroke_value = int(stroke_text)
+                    else:
+                        stroke_value = stroke_text
+
+            reading_meaning = character.find("reading_meaning")
+            kunyomi: List[str] = []
+            onyomi: List[str] = []
+            meanings: List[str] = []
+
+            if reading_meaning is not None:
+                for rmgroup in reading_meaning.findall("rmgroup"):
+                    for reading in rmgroup.findall("reading"):
+                        text = (reading.text or "").strip()
+                        if not text:
+                            continue
+                        r_type = reading.get("r_type") or ""
+                        if r_type == "ja_kun":
+                            kunyomi.append(text)
+                        elif r_type == "ja_on":
+                            onyomi.append(text)
+                    for meaning in rmgroup.findall("meaning"):
+                        text = (meaning.text or "").strip()
+                        if not text:
+                            continue
+                        lang = meaning.get("m_lang")
+                        if lang and lang not in {"", "en"}:
+                            continue
+                        meanings.append(text)
+
+            entry = {
+                "definition": "; ".join(dict.fromkeys(meanings)),
+                "stroke_count": stroke_value,
+                "kunyomi": list(dict.fromkeys(kunyomi)),
+                "onyomi": list(dict.fromkeys(onyomi)),
+            }
+            dictionary[literal] = entry
+
+        if not dictionary:
+            raise RuntimeError("No kanji entries were parsed from the dictionary XML")
+        return dictionary
+
+    def _collect_reviewed_kanji(
+        self,
+        collection: Collection,
+        vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
+    ) -> Set[str]:
+        reviewed: Set[str] = set()
+        for model, field_indexes in vocab_models:
+            if not field_indexes:
+                continue
+            rows = collection.db.all(
+                """
+                SELECT DISTINCT notes.id, notes.flds
+                FROM notes
+                JOIN cards ON cards.nid = notes.id
+                JOIN revlog ON revlog.cid = cards.id
+                WHERE notes.mid = ?
+                """,
+                model["id"],
+            )
+            for _, flds in rows:
+                fields = flds.split("\x1f")
+                for field_index in field_indexes:
+                    if field_index >= len(fields):
+                        continue
+                    value = fields[field_index]
+                    reviewed.update(KANJI_PATTERN.findall(value))
+        return reviewed
+
+    def _index_existing_kanji_notes(
+        self,
+        collection: Collection,
+        kanji_model: NotetypeDict,
+        kanji_field_index: int,
+    ) -> Dict[str, int]:
+        rows = collection.db.all(
+            "SELECT id, flds FROM notes WHERE mid = ?",
+            kanji_model["id"],
+        )
+        mapping: Dict[str, int] = {}
+        for note_id, flds in rows:
+            fields = flds.split("\x1f")
+            if kanji_field_index >= len(fields):
+                continue
+            value = fields[kanji_field_index].strip()
+            if value and value not in mapping:
+                mapping[value] = note_id
+        return mapping
+
+    def _ensure_note_tagged(self, collection: Collection, note_id: int, tag: str) -> Tuple[bool, Note]:
+        note = _get_note(collection, note_id)
+        if not tag:
+            return False, note
+        if tag in note.tags:
+            return False, note
+        _add_tag(note, tag)
+        note.flush()
+        return True, note
+
+    def _create_kanji_note(
+        self,
+        collection: Collection,
+        kanji_model: NotetypeDict,
+        field_indexes: Dict[str, int],
+        entry: Dict[str, object],
+        kanji_char: str,
+        existing_tag: str,
+        created_tag: str,
+    ) -> bool:
+        note = _new_note(collection, kanji_model)
+        field_names = {logical: kanji_model["flds"][idx]["name"] for logical, idx in field_indexes.items()}
+
+        self._assign_field(note, field_names.get("kanji"), kanji_char)
+        self._assign_field(note, field_names.get("definition"), entry.get("definition", ""))
+        stroke_count = entry.get("stroke_count", "")
+        if isinstance(stroke_count, int):
+            stroke_value = str(stroke_count)
+        else:
+            stroke_value = str(stroke_count or "")
+        self._assign_field(note, field_names.get("stroke_count"), stroke_value)
+        kunyomi_value = self._format_readings(entry.get("kunyomi"))
+        self._assign_field(note, field_names.get("kunyomi"), kunyomi_value)
+        onyomi_value = self._format_readings(entry.get("onyomi"))
+        self._assign_field(note, field_names.get("onyomi"), onyomi_value)
+
+        tags: List[str] = []
+        if existing_tag:
+            tags.append(existing_tag)
+        if created_tag:
+            tags.append(created_tag)
+        for tag in tags:
+            _add_tag(note, tag)
+
+        deck_id = self._resolve_deck_id(collection, kanji_model)
+        if not _add_note(collection, note, deck_id):
+            return False
+        return True
+
+    def _assign_field(self, note: Note, field_name: Optional[str], value: str) -> None:
+        if not field_name:
+            return
+        note[field_name] = value or ""
+
+    def _format_readings(self, value: object) -> str:
+        if isinstance(value, list):
+            return "; ".join(str(item) for item in value if item)
+        return str(value or "")
+
+    def _unsuspend_note_cards_if_needed(self, collection: Collection, note: Note) -> int:
+        leech_tag = "leech"
+        try:
+            col_conf = collection.conf
+        except AttributeError:
+            col_conf = {}
+        if isinstance(col_conf, dict):
+            leech_tag = (col_conf.get("leechTag") or leech_tag).strip() or "leech"
+
+        leech_lower = leech_tag.lower()
+        note_tags_lower = {tag.lower() for tag in note.tags}
+        if leech_lower and leech_lower in note_tags_lower:
+            return 0
+
+        card_rows = collection.db.all(
+            "SELECT id, queue FROM cards WHERE nid = ?",
+            note.id,
+        )
+        to_unsuspend = [card_id for card_id, queue in card_rows if queue == -1]
+        if not to_unsuspend:
+            return 0
+
+        _unsuspend_cards(collection, to_unsuspend)
+        return len(to_unsuspend)
+
+    def _resolve_deck_id(self, collection: Collection, model: NotetypeDict) -> int:
+        did = model.get("did")
+        if isinstance(did, int) and did > 0:
+            return did
+
+        decks = collection.decks
+        for attr in ("get_current_id", "current_id", "selected" ):
+            getter = getattr(decks, attr, None)
+            if callable(getter):
+                try:
+                    deck_id = getter()
+                    if isinstance(deck_id, int) and deck_id > 0:
+                        return deck_id
+                except TypeError:
+                    continue
+
+        current = getattr(decks, "current", None)
+        if callable(current):
+            try:
+                deck = current()
+            except TypeError:
+                deck = None
+        else:
+            deck = current
+
+        if isinstance(deck, dict):
+            deck_id = deck.get("id")
+            if isinstance(deck_id, int) and deck_id > 0:
+                return deck_id
+
+        get = getattr(decks, "id", None)
+        if callable(get):
+            try:
+                return get("Default")
+            except Exception:
+                pass
+
+        # Fallback to the first deck available
+        all_decks = getattr(decks, "all_names_and_ids", None)
+        if callable(all_decks):
+            entries = all_decks()
+            if entries:
+                return entries[0].id if hasattr(entries[0], "id") else entries[0][1]
+
+        raise RuntimeError("Unable to determine a deck for new kanji notes")
+
+
+class KanjiVocabSyncSettingsDialog(QDialog):
+    """Settings dialog for configuring the add-on."""
+
+    def __init__(self, manager: KanjiVocabSyncManager, config: AddonConfig) -> None:
+        super().__init__(manager.mw)
+        self.setWindowTitle("Kanji Vocab Sync Settings")
+        self.manager = manager
+        self.config = config
+
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self._build_general_tab()
+        self._build_kanji_tab()
+        self._build_vocab_tab()
+
+        buttons = QDialogButtonBox(BUTTON_OK | BUTTON_CANCEL)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    # ------------------------------------------------------------------
+    # Tabs
+    # ------------------------------------------------------------------
+    def _build_general_tab(self) -> None:
+        widget = QGroupBox("General")
+        form = QFormLayout(widget)
+
+        self.existing_tag_edit = QLineEdit(self.config.existing_tag)
+        self.created_tag_edit = QLineEdit(self.config.created_tag)
+        self.dictionary_edit = QLineEdit(self.config.dictionary_file)
+
+        form.addRow("Existing kanji tag", self.existing_tag_edit)
+        form.addRow("Auto-created kanji tag", self.created_tag_edit)
+        form.addRow("Dictionary file", self.dictionary_edit)
+
+        self.tabs.addTab(widget, "General")
+
+    def _build_kanji_tab(self) -> None:
+        widget = QWidget()
+        layout = QFormLayout(widget)
+
+        self.kanji_model_combo = QComboBox()
+        self.models_by_index: List[Optional[NotetypeDict]] = []
+        self._populate_model_combo(self.kanji_model_combo, self.models_by_index, self.config.kanji_note_type.name)
+
+        layout.addRow("Kanji note type", self.kanji_model_combo)
+
+        self.kanji_field_combos: Dict[str, QComboBox] = {}
+        for logical_field, label in [
+            ("kanji", "Kanji field"),
+            ("definition", "Definition field"),
+            ("stroke_count", "Stroke count field"),
+            ("kunyomi", "Kunyomi field"),
+            ("onyomi", "Onyomi field"),
+        ]:
+            combo = QComboBox()
+            self.kanji_field_combos[logical_field] = combo
+            layout.addRow(label, combo)
+
+        self.kanji_model_combo.currentIndexChanged.connect(self._refresh_kanji_field_combos)
+        self._refresh_kanji_field_combos()
+
+        self.tabs.addTab(widget, "Kanji note")
+
+    def _build_vocab_tab(self) -> None:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        self.vocab_list = QListWidget()
+        self.vocab_list.setSelectionMode(SINGLE_SELECTION)
+        layout.addWidget(self.vocab_list)
+
+        button_row = QHBoxLayout()
+        add_button = QPushButton("Add")
+        edit_button = QPushButton("Edit")
+        remove_button = QPushButton("Remove")
+        button_row.addWidget(add_button)
+        button_row.addWidget(edit_button)
+        button_row.addWidget(remove_button)
+        layout.addLayout(button_row)
+
+        add_button.clicked.connect(self._add_vocab_entry)
+        edit_button.clicked.connect(self._edit_vocab_entry)
+        remove_button.clicked.connect(self._remove_vocab_entry)
+
+        self.tabs.addTab(widget, "Vocab notes")
+
+        self._reload_vocab_entries()
+
+    # ------------------------------------------------------------------
+    # Dialog helpers
+    # ------------------------------------------------------------------
+    def _populate_model_combo(
+        self,
+        combo: QComboBox,
+        container: List[Optional[NotetypeDict]],
+        selected_name: str,
+    ) -> None:
+        combo.clear()
+        container.clear()
+        models = self.manager.mw.col.models.all()
+        names = sorted(model["name"] for model in models)
+        combo.addItem("<Select note type>")
+        container.append(None)
+        selected_index = 0
+        for idx, name in enumerate(names, start=1):
+            combo.addItem(name)
+            container.append(self.manager.mw.col.models.byName(name))
+            if name == selected_name:
+                selected_index = idx
+        combo.setCurrentIndex(selected_index)
+
+    def _refresh_kanji_field_combos(self) -> None:
+        model = self._current_kanji_model()
+        for logical, combo in self.kanji_field_combos.items():
+            combo.clear()
+            combo.addItem("<Not set>")
+            if not model:
+                continue
+            field_names = [fld["name"] for fld in model["flds"]]
+            combo.addItems(field_names)
+            current_name = self.config.kanji_note_type.fields.get(logical, "")
+            try:
+                combo.setCurrentIndex(field_names.index(current_name) + 1)
+            except ValueError:
+                combo.setCurrentIndex(0)
+
+    def _current_kanji_model(self) -> Optional[NotetypeDict]:
+        index = self.kanji_model_combo.currentIndex()
+        if index < 0 or index >= len(self.models_by_index):
+            return None
+        return self.models_by_index[index]
+
+    def _reload_vocab_entries(self) -> None:
+        self.vocab_list.clear()
+        for entry in self.config.vocab_note_types:
+            fields = ", ".join(entry.fields)
+            item = QListWidgetItem(f"{entry.name} — {fields}")
+            item.setData(USER_ROLE, entry)
+            self.vocab_list.addItem(item)
+
+    def _add_vocab_entry(self) -> None:
+        dialog = VocabNoteConfigDialog(self.manager)
+        if dialog.exec() == DIALOG_ACCEPTED:
+            cfg = dialog.get_result()
+            self.config.vocab_note_types.append(cfg)
+            self._reload_vocab_entries()
+
+    def _edit_vocab_entry(self) -> None:
+        current_item = self.vocab_list.currentItem()
+        if not current_item:
+            return
+        existing_cfg: VocabNoteTypeConfig = current_item.data(USER_ROLE)
+        dialog = VocabNoteConfigDialog(self.manager, existing_cfg)
+        if dialog.exec() == DIALOG_ACCEPTED:
+            new_cfg = dialog.get_result()
+            index = self.config.vocab_note_types.index(existing_cfg)
+            self.config.vocab_note_types[index] = new_cfg
+            self._reload_vocab_entries()
+
+    def _remove_vocab_entry(self) -> None:
+        current_item = self.vocab_list.currentItem()
+        if not current_item:
+            return
+        existing_cfg: VocabNoteTypeConfig = current_item.data(USER_ROLE)
+        self.config.vocab_note_types.remove(existing_cfg)
+        self._reload_vocab_entries()
+
+    # ------------------------------------------------------------------
+    # Validation and persistence
+    # ------------------------------------------------------------------
+    def accept(self) -> None:  # noqa: D401
+        if not self._persist_general_tab():
+            return
+        if not self._persist_kanji_tab():
+            return
+        if not self._validate_vocab_entries():
+            return
+        self.manager.save_config(self.config)
+        super().accept()
+
+    def _persist_general_tab(self) -> bool:
+        self.config.existing_tag = self.existing_tag_edit.text().strip()
+        self.config.created_tag = self.created_tag_edit.text().strip()
+        self.config.dictionary_file = self.dictionary_edit.text().strip()
+        if not self.config.dictionary_file:
+            show_warning("Please provide a dictionary file path.")
+            return False
+        return True
+
+    def _persist_kanji_tab(self) -> bool:
+        model = self._current_kanji_model()
+        if not model:
+            show_warning("Please choose a kanji note type.")
+            return False
+        self.config.kanji_note_type.name = model["name"]
+        for logical, combo in self.kanji_field_combos.items():
+            if combo.currentIndex() <= 0:
+                self.config.kanji_note_type.fields[logical] = ""
+                continue
+            self.config.kanji_note_type.fields[logical] = combo.currentText()
+        required_field = self.config.kanji_note_type.fields.get("kanji", "").strip()
+        if not required_field:
+            show_warning("Please assign a field that stores the kanji character.")
+            return False
+        return True
+
+    def _validate_vocab_entries(self) -> bool:
+        if not self.config.vocab_note_types:
+            show_warning("Configure at least one vocabulary note type to scan.")
+            return False
+        return True
+
+
+class VocabNoteConfigDialog(QDialog):
+    """Dialog to configure a single vocabulary note type entry."""
+
+    def __init__(
+        self,
+        manager: KanjiVocabSyncManager,
+        existing: Optional[VocabNoteTypeConfig] = None,
+    ) -> None:
+        super().__init__(manager.mw)
+        self.manager = manager
+        self.setWindowTitle("Vocabulary Note Type")
+        self.existing = existing
+
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.model_combo = QComboBox()
+        self._models: List[Optional[NotetypeDict]] = []
+        selected_name = existing.name if existing else ""
+        self._populate_models(selected_name)
+        form.addRow("Note type", self.model_combo)
+
+        self.fields_list = QListWidget()
+        self.fields_list.setSelectionMode(NO_SELECTION)
+        layout.addWidget(QLabel("Fields to scan for kanji"))
+        layout.addWidget(self.fields_list)
+        self.model_combo.currentIndexChanged.connect(self._populate_fields)
+        self._populate_fields()
+
+        buttons = QDialogButtonBox(BUTTON_OK | BUTTON_CANCEL)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _populate_models(self, selected_name: str) -> None:
+        models = self.manager.mw.col.models.all()
+        names = sorted(model["name"] for model in models)
+        self.model_combo.addItem("<Select note type>")
+        self._models.append(None)
+        selected_index = 0
+        for idx, name in enumerate(names, start=1):
+            self.model_combo.addItem(name)
+            self._models.append(self.manager.mw.col.models.byName(name))
+            if name == selected_name:
+                selected_index = idx
+        self.model_combo.setCurrentIndex(selected_index)
+
+    def _populate_fields(self) -> None:
+        self.fields_list.clear()
+        model = self._current_model()
+        if not model:
+            return
+        existing_fields = set(self.existing.fields) if self.existing else set()
+        for field in model["flds"]:
+            item = QListWidgetItem(field["name"])
+            item.setFlags(item.flags() | ITEM_IS_USER_CHECKABLE)
+            item.setCheckState(CHECKED_STATE if field["name"] in existing_fields else UNCHECKED_STATE)
+            self.fields_list.addItem(item)
+
+    def _current_model(self) -> Optional[NotetypeDict]:
+        index = self.model_combo.currentIndex()
+        if index < 0 or index >= len(self._models):
+            return None
+        return self._models[index]
+
+    def _on_accept(self) -> None:
+        model = self._current_model()
+        if not model:
+            show_warning("Please choose a note type.")
+            return
+        selected_fields = [
+            self.fields_list.item(index).text()
+            for index in range(self.fields_list.count())
+            if self.fields_list.item(index).checkState() == CHECKED_STATE
+        ]
+        if not selected_fields:
+            show_warning("Select at least one field to scan for kanji.")
+            return
+        self.existing = VocabNoteTypeConfig(name=model["name"], fields=selected_fields)
+        self.accept()
+
+    def get_result(self) -> VocabNoteTypeConfig:
+        if not self.existing:
+            raise RuntimeError("Dialog accepted without configuration")
+        return self.existing
+
+
+_manager: Optional[KanjiVocabSyncManager] = None
+
+
+def _initialize_manager() -> None:
+    global _manager
+    if _manager is None and mw is not None:
+        _manager = KanjiVocabSyncManager()
+
+
+def on_profile_loaded() -> None:
+    _initialize_manager()
+
+
+def on_main_window_did_init() -> None:
+    _initialize_manager()
+
+
+gui_hooks.profile_did_open.append(on_profile_loaded)
+gui_hooks.main_window_did_init.append(on_main_window_did_init)
+
+
+# ----------------------------------------------------------------------
+# Backwards compatibility helpers
+# ----------------------------------------------------------------------
+def _add_note(collection: Collection, note: Note, deck_id: Optional[int] = None) -> bool:
+    handler = getattr(collection, "add_note", None)
+    if callable(handler):
+        try:
+            if deck_id is None:
+                return handler(note)
+            return handler(note, deck_id)
+        except TypeError as err:
+            message = str(err)
+            if "deck_id" in message:
+                if deck_id is None:
+                    raise
+                return handler(note, deck_id)
+            raise
+    return collection.addNote(note)
+
+
+def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> None:
+    if not card_ids:
+        return
+    sched = getattr(collection, "sched", None)
+    if sched is not None:
+        for attr in ("unsuspend_cards", "unsuspendCards"):
+            func = getattr(sched, attr, None)
+            if callable(func):
+                func(list(card_ids))
+                return
+
+    placeholders = ",".join("?" for _ in card_ids)
+    params: List[object] = [intTime(), collection.usn()] + list(card_ids)
+    collection.db.execute(
+        f"UPDATE cards SET mod = ?, usn = ?, queue = type WHERE id IN ({placeholders})",
+        params,
+    )
+
+
+def _new_note(collection: Collection, model: NotetypeDict) -> Note:
+    handler = getattr(collection, "new_note", None)
+    if callable(handler):
+        return handler(model)
+    return collection.newNote(model)
+
+
+def _get_note(collection: Collection, note_id: int) -> Note:
+    handler = getattr(collection, "get_note", None)
+    if callable(handler):
+        return handler(note_id)
+    return collection.getNote(note_id)
+
+
+def _add_tag(note: Note, tag: str) -> None:
+    handler = getattr(note, "add_tag", None)
+    if callable(handler):
+        handler(tag)
+        return
+    note.addTag(tag)
