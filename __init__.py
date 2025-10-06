@@ -910,7 +910,11 @@ class KanjiVocabSyncManager:
             kanji_char = fields[kanji_field_index].strip()
             if not kanji_char:
                 continue
-            info = usage_info.get(kanji_char, KanjiUsageInfo())
+            info = usage_info.get(kanji_char)
+            has_vocab = True
+            if info is None:
+                info = KanjiUsageInfo()
+                has_vocab = False
             entry = dictionary.get(kanji_char) or {}
             freq_val = entry.get("frequency")
             freq = None
@@ -919,7 +923,7 @@ class KanjiVocabSyncManager:
             elif isinstance(freq_val, str) and freq_val.isdigit():
                 freq = int(freq_val)
 
-            key = self._build_reorder_key(mode, info, freq, due_value, card_id)
+            key = self._build_reorder_key(mode, info, freq, due_value, card_id, has_vocab)
             entries.append((key, card_id, due_value, original_mod, original_usn))
 
         if not entries:
@@ -946,6 +950,7 @@ class KanjiVocabSyncManager:
         frequency: Optional[int],
         due_value: Optional[int],
         card_id: int,
+        has_vocab: bool,
     ) -> Tuple:
         big = 10**9
         review_order = info.first_review_order if info.first_review_order is not None else big
@@ -953,18 +958,50 @@ class KanjiVocabSyncManager:
         new_due = info.first_new_due if info.first_new_due is not None else due_value
         if new_due is None:
             new_due = big
+        due_sort = due_value if due_value is not None else big
+        has_frequency = frequency is not None
+        freq_value = frequency if has_frequency else big
 
-        if mode == "frequency":
-            if frequency is not None:
-                return (0, frequency, new_due, review_order, new_order, card_id)
-            return (1, new_due, new_order, review_order, card_id)
+        if has_vocab and info.reviewed:
+            vocab_tuple: Tuple = (
+                0,
+                freq_value,
+                review_order,
+                new_due,
+                new_order,
+                card_id,
+            )
+        elif has_vocab:
+            vocab_tuple = (
+                1,
+                new_due,
+                freq_value,
+                new_order,
+                review_order,
+                card_id,
+            )
+        else:
+            vocab_tuple = (
+                2,
+                0 if has_frequency else 1,
+                freq_value,
+                due_sort,
+                card_id,
+            )
 
-        # mode == "vocab"
-        if info.reviewed:
-            freq_sort = frequency if frequency is not None else big
-            return (0, freq_sort, review_order, new_due, new_order, card_id)
-        freq_sort = frequency if frequency is not None else big
-        return (1, new_due, freq_sort, new_order, card_id)
+        if mode == "vocab":
+            return vocab_tuple
+
+        # mode == "frequency"
+        if has_frequency:
+            return (
+                0,
+                freq_value,
+                card_id,
+            )
+
+        bucket, *rest = vocab_tuple
+        return (1 + bucket, *rest)
 
     def _apply_kanji_updates(
         self,
