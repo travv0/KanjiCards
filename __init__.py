@@ -923,12 +923,15 @@ class KanjiVocabSyncManager:
             if not deck_entries:
                 continue
             deck_entries.sort(key=lambda item: item[0])
-            for position, (key, card_id, original_due, original_mod, original_usn) in enumerate(deck_entries):
-                new_mod = now if position != original_due else original_mod
-                new_usn = usn if position != original_due else original_usn
+            original_dues = [original_due for _, _, original_due, _, _ in deck_entries if isinstance(original_due, int)]
+            base_due = min(original_dues) if original_dues else 0
+            for offset, (key, card_id, original_due, original_mod, original_usn) in enumerate(deck_entries):
+                new_due = base_due + offset
+                new_mod = now if new_due != original_due else original_mod
+                new_usn = usn if new_due != original_due else original_usn
                 collection.db.execute(
                     "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
-                    position,
+                    new_due,
                     new_mod,
                     new_usn,
                     card_id,
