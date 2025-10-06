@@ -276,6 +276,7 @@ class KanjiVocabSyncManager:
             kanji_field_index,
             cfg,
             existing_notes,
+            prune_existing=True,
         )
 
         return stats
@@ -386,7 +387,7 @@ class KanjiVocabSyncManager:
             trigger()
 
     def _stats_warrant_sync(self, stats: Dict[str, object]) -> bool:
-        for key in ("created", "existing_tagged", "unsuspended"):
+        for key in ("created", "existing_tagged", "unsuspended", "tag_removed"):
             try:
                 if int(stats.get(key, 0)) > 0:
                     return True
@@ -655,6 +656,7 @@ class KanjiVocabSyncManager:
         created = int(stats.get("created", 0))
         tagged = int(stats.get("existing_tagged", 0))
         unsuspended = int(stats.get("unsuspended", 0))
+        removed = int(stats.get("tag_removed", 0))
 
         lines = [
             f"Scanned: {scanned}",
@@ -663,6 +665,8 @@ class KanjiVocabSyncManager:
         ]
         if unsuspended:
             lines.append(f"Unsuspended: {unsuspended}")
+        if removed:
+            lines.append(f"Tag removed: {removed}")
 
         missing = stats.get("missing_dictionary")
         if missing:
@@ -724,6 +728,25 @@ class KanjiVocabSyncManager:
         note.flush()
         return True, note
 
+    def _remove_unused_tags(
+        self,
+        collection: Collection,
+        existing_notes: Dict[str, int],
+        tag: str,
+        active_chars: Set[str],
+    ) -> int:
+        removed = 0
+        for kanji_char, note_id in existing_notes.items():
+            if kanji_char in active_chars:
+                continue
+            note = _get_note(collection, note_id)
+            if tag not in note.tags:
+                continue
+            _remove_tag(note, tag)
+            note.flush()
+            removed += 1
+        return removed
+
     def _apply_kanji_updates(
         self,
         collection: Collection,
@@ -734,6 +757,7 @@ class KanjiVocabSyncManager:
         kanji_field_index: int,
         cfg: AddonConfig,
         existing_notes: Optional[Dict[str, int]] = None,
+        prune_existing: bool = False,
     ) -> Dict[str, object]:
         unique_chars: Set[str] = {char for char in kanji_chars if char}
         stats = {
@@ -742,6 +766,7 @@ class KanjiVocabSyncManager:
             "created": 0,
             "unsuspended": 0,
             "missing_dictionary": set(),
+            "tag_removed": 0,
         }
 
         if not unique_chars:
@@ -779,6 +804,14 @@ class KanjiVocabSyncManager:
             if created_note_id:
                 stats["created"] += 1
                 existing_notes[kanji_char] = created_note_id
+
+        if prune_existing and cfg.existing_tag:
+            stats["tag_removed"] = self._remove_unused_tags(
+                collection,
+                existing_notes,
+                cfg.existing_tag,
+                unique_chars,
+            )
 
         return stats
 
@@ -1396,3 +1429,11 @@ def _add_tag(note: Note, tag: str) -> None:
         handler(tag)
         return
     note.addTag(tag)
+
+
+def _remove_tag(note: Note, tag: str) -> None:
+    handler = getattr(note, "remove_tag", None)
+    if callable(handler):
+        handler(tag)
+        return
+    note.removeTag(tag)
