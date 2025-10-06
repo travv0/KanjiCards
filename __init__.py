@@ -236,10 +236,12 @@ class KanjiVocabSyncManager:
         except Exception as err:  # noqa: BLE001
             self.mw.progress.finish()
             show_critical(f"Kanji Vocab Sync failed:\n{err}")
+            return None
         else:
             self.mw.progress.finish()
             self._notify_summary(stats)
             self.mw.reset()
+            return stats
 
     def _sync_internal(self) -> Dict[str, object]:
         cfg = self.load_config()
@@ -369,12 +371,43 @@ class KanjiVocabSyncManager:
                 QTimer.singleShot(200, trigger)
                 return
             self._realtime_error_logged = False
-            self.run_sync()
+            stats = self.run_sync()
+            if stats and self._stats_warrant_sync(stats):
+                QTimer.singleShot(200, self._trigger_followup_sync)
 
         try:
             self.mw.taskman.run_on_main(trigger)
         except Exception:
             trigger()
+
+    def _stats_warrant_sync(self, stats: Dict[str, object]) -> bool:
+        for key in ("created", "existing_tagged", "unsuspended"):
+            try:
+                if int(stats.get(key, 0)) > 0:
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _trigger_followup_sync(self) -> None:
+        methods = [
+            "on_sync_button_clicked",
+            "onSyncButton",
+            "onSync",
+            "on_sync_clicked",
+        ]
+        for name in methods:
+            handler = getattr(self.mw, name, None)
+            if callable(handler):
+                handler()
+                return
+        toolbar = getattr(self.mw, "form", None)
+        sync_button = getattr(toolbar, "syncButton", None)
+        if sync_button is not None:
+            try:
+                sync_button.animateClick()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Helpers
