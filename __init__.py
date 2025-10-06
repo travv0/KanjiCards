@@ -953,7 +953,8 @@ class KanjiVocabSyncManager:
         if info.reviewed:
             freq_sort = frequency if frequency is not None else big
             return (0, freq_sort, review_order, new_due, new_order, card_id)
-        return (1, new_due, new_order, frequency if frequency is not None else big, card_id)
+        freq_sort = frequency if frequency is not None else big
+        return (1, new_due, freq_sort, new_order, card_id)
 
     def _apply_kanji_updates(
         self,
