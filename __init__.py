@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import defaultdict
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -109,6 +110,8 @@ class AddonConfig:
     unsuspended_tag: str
     reorder_mode: str
     ignore_suspended_vocab: bool
+    auto_suspend_vocab: bool
+    auto_suspend_tag: str
 
 
 @dataclass
@@ -134,6 +137,7 @@ class KanjiVocabSyncManager:
         self._missing_deck_logged = False
         self._sync_hook_installed = False
         self._sync_hook_target: Optional[str] = None
+        self._profile_config_error_logged = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -148,8 +152,62 @@ class KanjiVocabSyncManager:
     # ------------------------------------------------------------------
     # Configuration helpers
     # ------------------------------------------------------------------
+    def _profile_config_path(self) -> Optional[str]:
+        pm = getattr(self.mw, "pm", None)
+        if pm is None:
+            return None
+        try:
+            folder = pm.profileFolder()
+        except Exception:
+            return None
+        if not folder:
+            return None
+        return os.path.join(folder, "kanjicards_config.json")
+
+    def _load_profile_config(self) -> Dict[str, Any]:
+        path = self._profile_config_path()
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as err:  # noqa: BLE001
+            if not self._profile_config_error_logged:
+                print(f"[KanjiCards] Failed to load profile config: {err}")
+                self._profile_config_error_logged = True
+            return {}
+        self._profile_config_error_logged = False
+        if isinstance(data, dict):
+            return data
+        return {}
+
+    def _write_profile_config(self, data: Dict[str, Any]) -> None:
+        path = self._profile_config_path()
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False)
+        except Exception as err:  # noqa: BLE001
+            print(f"[KanjiCards] Failed to write profile config: {err}")
+
+    def _merge_config_sources(self, global_cfg: Dict[str, Any], profile_cfg: Dict[str, Any]) -> Dict[str, Any]:
+        if not profile_cfg:
+            return dict(global_cfg)
+
+        merged = dict(global_cfg)
+        for key, value in profile_cfg.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._merge_config_sources(merged[key], value)  # type: ignore[arg-type]
+            else:
+                merged[key] = value
+        return merged
+
     def load_config(self) -> AddonConfig:
-        raw = self.mw.addonManager.getConfig(__name__) or {}
+        global_raw = self.mw.addonManager.getConfig(__name__) or {}
+        profile_raw = self._load_profile_config()
+        raw = self._merge_config_sources(global_raw, profile_raw)
         vocab_cfg = [
             VocabNoteTypeConfig(name=item.get("note_type", ""), fields=item.get("fields", []) or [])
             for item in raw.get("vocab_note_types", [])
@@ -171,6 +229,8 @@ class KanjiVocabSyncManager:
             unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
             reorder_mode=raw.get("reorder_mode", "vocab"),
             ignore_suspended_vocab=raw.get("ignore_suspended_vocab", False),
+            auto_suspend_vocab=raw.get("auto_suspend_vocab", False),
+            auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_unreviewed"),
         )
 
     def save_config(self, cfg: AddonConfig) -> None:
@@ -192,8 +252,11 @@ class KanjiVocabSyncManager:
             "unsuspended_tag": cfg.unsuspended_tag,
             "reorder_mode": cfg.reorder_mode,
             "ignore_suspended_vocab": bool(cfg.ignore_suspended_vocab),
+            "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
+            "auto_suspend_tag": cfg.auto_suspend_tag,
         }
         self.mw.addonManager.writeConfig(__name__, raw)
+        self._write_profile_config(raw)
         self._dictionary_cache = None
         self._existing_notes_cache = None
         self._kanji_model_cache = None
@@ -307,6 +370,16 @@ class KanjiVocabSyncManager:
                 dictionary,
             )
 
+        vocab_field_map = {model["id"]: field_indexes for model, field_indexes in vocab_models}
+        suspension_stats = self._update_vocab_suspension(
+            collection,
+            cfg,
+            vocab_field_map,
+            existing_notes,
+        )
+        stats["vocab_suspended"] += suspension_stats.get("vocab_suspended", 0)
+        stats["vocab_unsuspended"] += suspension_stats.get("vocab_unsuspended", 0)
+
         return stats
 
     def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
@@ -398,6 +471,15 @@ class KanjiVocabSyncManager:
                 usage_all,
                 dictionary,
             )
+
+        vocab_field_map = {model["id"]: fields for model, fields in vocab_map.values()}
+        self._update_vocab_suspension(
+            collection,
+            cfg,
+            vocab_field_map,
+            existing_notes,
+            target_chars=kanji_chars,
+        )
 
         self._realtime_error_logged = False
 
@@ -690,24 +772,18 @@ class KanjiVocabSyncManager:
         for model, field_indexes in vocab_models:
             if not field_indexes:
                 continue
-            ignore_suspended = cfg.ignore_suspended_vocab
-            reviewed_case = "cards.reps > 0"
-            join_clause = "JOIN cards ON cards.nid = notes.id"
-            if ignore_suspended:
-                reviewed_case += " AND cards.queue != -1"
-                join_clause += " AND cards.queue != -1"
-            rows = collection.db.all(
-                f"""
-                SELECT notes.id,
-                       notes.flds,
-                       MAX(CASE WHEN {reviewed_case} THEN 1 ELSE 0 END) AS has_reviewed,
-                       MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due
-                FROM notes
-                {join_clause}
-                WHERE notes.mid = ?
-                GROUP BY notes.id
-                """,
+            sql = (
+                "SELECT notes.id, notes.flds, "
+                "MAX(CASE WHEN cards.reps > 0 THEN 1 ELSE 0 END) AS has_reviewed, "
+                "MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due "
+                "FROM notes JOIN cards ON cards.nid = notes.id "
+                "WHERE notes.mid = ? GROUP BY notes.id"
+            )
+            rows = _db_all(
+                collection,
+                sql,
                 model["id"],
+                context=f"collect_vocab_usage:{model.get('name')}",
             )
             rows.sort(key=lambda row: (
                 0 if row[3] is not None else 1,
@@ -715,7 +791,26 @@ class KanjiVocabSyncManager:
                 row[0],
             ))
 
+            active_map: Dict[int, bool] = {}
+            auto_suspend_tag = cfg.auto_suspend_tag.strip()
+            auto_suspend_tag_lower = auto_suspend_tag.lower()
+            if cfg.ignore_suspended_vocab and rows:
+                note_ids = [row[0] for row in rows]
+                active_map = self._load_note_active_status(collection, note_ids)
+
             for note_id, flds, has_reviewed, min_new_due in rows:
+                if cfg.ignore_suspended_vocab:
+                    has_active = active_map.get(note_id, False)
+                    if not has_active:
+                        if not auto_suspend_tag_lower:
+                            continue
+                        try:
+                            note_obj = _get_note(collection, note_id)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        note_tags_lower = {tag.lower() for tag in getattr(note_obj, "tags", [])}
+                        if auto_suspend_tag_lower not in note_tags_lower:
+                            continue
                 reviewed_flag = bool(has_reviewed)
                 review_rank = None
                 if reviewed_flag:
@@ -774,6 +869,8 @@ class KanjiVocabSyncManager:
         unsuspended = int(stats.get("unsuspended", 0))
         removed = int(stats.get("tag_removed", 0))
         resuspended = int(stats.get("resuspended", 0))
+        vocab_suspended = int(stats.get("vocab_suspended", 0))
+        vocab_unsuspended = int(stats.get("vocab_unsuspended", 0))
 
         lines = [
             f"Scanned: {scanned}",
@@ -786,6 +883,10 @@ class KanjiVocabSyncManager:
             lines.append(f"Tags removed: {removed}")
         if resuspended:
             lines.append(f"Resuspended: {resuspended}")
+        if vocab_suspended:
+            lines.append(f"Vocab suspended: {vocab_suspended}")
+        if vocab_unsuspended:
+            lines.append(f"Vocab unsuspended: {vocab_unsuspended}")
 
         missing = stats.get("missing_dictionary")
         if missing:
@@ -809,9 +910,11 @@ class KanjiVocabSyncManager:
         kanji_model: NotetypeDict,
         kanji_field_index: int,
     ) -> Dict[str, int]:
-        rows = collection.db.all(
+        rows = _db_all(
+            collection,
             "SELECT id, flds FROM notes WHERE mid = ?",
             kanji_model["id"],
+            context="index_existing_kanji_notes",
         )
         mapping: Dict[str, int] = {}
         for note_id, flds in rows:
@@ -890,7 +993,8 @@ class KanjiVocabSyncManager:
         if mode not in {"frequency", "vocab"}:
             return
 
-        rows = collection.db.all(
+        rows = _db_all(
+            collection,
             """
             SELECT cards.id, cards.nid, cards.due, cards.did, cards.mod, cards.usn, notes.flds
             FROM cards
@@ -898,6 +1002,7 @@ class KanjiVocabSyncManager:
             WHERE notes.mid = ? AND cards.queue = 0
             """,
             kanji_model["id"],
+            context="reorder_new_kanji_cards/load",
         )
         if not rows:
             return
@@ -935,12 +1040,14 @@ class KanjiVocabSyncManager:
         for new_due, (key, card_id, original_due, original_mod, original_usn) in enumerate(entries):
             new_mod = now if new_due != original_due else original_mod
             new_usn = usn if new_due != original_due else original_usn
-            collection.db.execute(
+            _db_execute(
+                collection,
                 "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
                 new_due,
                 new_mod,
                 new_usn,
                 card_id,
+                context="reorder_new_kanji_cards/update",
             )
 
     def _build_reorder_key(
@@ -1024,6 +1131,8 @@ class KanjiVocabSyncManager:
             "missing_dictionary": set(),
             "tag_removed": 0,
             "resuspended": 0,
+            "vocab_suspended": 0,
+            "vocab_unsuspended": 0,
         }
 
         if not unique_chars:
@@ -1074,6 +1183,193 @@ class KanjiVocabSyncManager:
             )
             stats["tag_removed"] = removed
             stats["resuspended"] = resuspended
+
+        return stats
+
+    def _compute_kanji_reviewed_flags(
+        self,
+        collection: Collection,
+        existing_notes: Dict[str, int],
+    ) -> Dict[str, bool]:
+        if not existing_notes:
+            return {}
+        note_ids = list(dict.fromkeys(existing_notes.values()))
+        if not note_ids:
+            return {}
+        placeholders = ",".join("?" for _ in note_ids)
+        rows = _db_all(
+            collection,
+            f"SELECT nid, MAX(reps) FROM cards WHERE nid IN ({placeholders}) GROUP BY nid",
+            *note_ids,
+            context="compute_kanji_reviewed_flags",
+        )
+        status_by_note: Dict[int, bool] = {nid: (max_reps or 0) > 0 for nid, max_reps in rows}
+        return {char: status_by_note.get(note_id, False) for char, note_id in existing_notes.items()}
+
+    def _fetch_vocab_rows(
+        self,
+        collection: Collection,
+        model_id: int,
+        target_chars: Optional[Set[str]] = None,
+    ) -> List[Tuple[int, str, str]]:
+        if not target_chars:
+            return _db_all(
+                collection,
+                "SELECT id, flds, tags FROM notes WHERE mid = ?",
+                model_id,
+                context="fetch_vocab_rows/all",
+            )
+        chars = [char for char in target_chars if char]
+        if not chars:
+            return []
+        clause = " OR ".join("instr(notes.flds, ?) > 0" for _ in chars)
+        params: List[object] = [model_id, *chars]
+        sql = f"SELECT id, flds, tags FROM notes WHERE mid = ? AND ({clause})"
+        return _db_all(
+            collection,
+            sql,
+            *params,
+            context="fetch_vocab_rows/filter",
+        )
+
+    def _collect_vocab_note_chars(
+        self,
+        collection: Collection,
+        vocab_field_map: Dict[int, List[int]],
+        target_chars: Optional[Set[str]] = None,
+    ) -> Dict[int, Tuple[Set[str], Set[str]]]:
+        result: Dict[int, Tuple[Set[str], Set[str]]] = {}
+        for model_id, field_indexes in vocab_field_map.items():
+            if not field_indexes:
+                continue
+            rows = self._fetch_vocab_rows(collection, model_id, target_chars)
+            if not rows:
+                continue
+            for note_id, flds, tags in rows:
+                fields = flds.split("\x1f")
+                chars: Set[str] = set()
+                for field_index in field_indexes:
+                    if field_index >= len(fields):
+                        continue
+                    chars.update(KANJI_PATTERN.findall(fields[field_index]))
+                if not chars:
+                    continue
+                if target_chars and chars.isdisjoint(target_chars):
+                    continue
+                tag_set = {tag for tag in tags.strip().split() if tag}
+                result[note_id] = (chars, tag_set)
+        return result
+
+    def _load_card_status_for_notes(
+        self,
+        collection: Collection,
+        note_ids: Sequence[int],
+    ) -> Dict[int, List[Tuple[int, int]]]:
+        unique_ids = list(dict.fromkeys(note_ids))
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = _db_all(
+            collection,
+            f"SELECT id, nid, queue FROM cards WHERE nid IN ({placeholders})",
+            *unique_ids,
+            context="load_card_status_for_notes",
+        )
+        card_map: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
+        for card_id, nid, queue in rows:
+            card_map[nid].append((card_id, queue))
+        return card_map
+
+    def _load_note_active_status(
+        self,
+        collection: Collection,
+        note_ids: Sequence[int],
+    ) -> Dict[int, bool]:
+        unique_ids = list(dict.fromkeys(note_ids))
+        if not unique_ids:
+            return {}
+        placeholders = ",".join("?" for _ in unique_ids)
+        sql = (
+            "SELECT nid, MAX(CASE WHEN queue != -1 THEN 1 ELSE 0 END) "
+            "FROM cards WHERE nid IN (%s) GROUP BY nid" % placeholders
+        )
+        rows = _db_all(
+            collection,
+            sql,
+            *unique_ids,
+            context="load_note_active_status",
+        )
+        return {nid: bool(flag) for nid, flag in rows}
+
+    def _update_vocab_suspension(
+        self,
+        collection: Collection,
+        cfg: AddonConfig,
+        vocab_field_map: Dict[int, List[int]],
+        existing_notes: Dict[str, int],
+        target_chars: Optional[Set[str]] = None,
+    ) -> Dict[str, int]:
+        stats = {"vocab_suspended": 0, "vocab_unsuspended": 0}
+        tag = cfg.auto_suspend_tag.strip()
+        if not tag:
+            return stats
+        notes_info = self._collect_vocab_note_chars(collection, vocab_field_map, target_chars)
+        if not notes_info:
+            return stats
+        tag_lower = tag.lower()
+        kanji_reviewed = self._compute_kanji_reviewed_flags(collection, existing_notes)
+        card_map = self._load_card_status_for_notes(collection, notes_info.keys())
+
+        for note_id, (chars, tag_set) in notes_info.items():
+            tag_set_lower = {value.lower() for value in tag_set}
+            note_has_tag = tag_lower in tag_set_lower
+            requires_suspend = any(not kanji_reviewed.get(char, False) for char in chars)
+            cards = card_map.get(note_id, [])
+            if cfg.auto_suspend_vocab:
+                if requires_suspend:
+                    unsuspended_cards = [card_id for card_id, queue in cards if queue != -1]
+                    if not unsuspended_cards:
+                        continue
+                    note = _get_note(collection, note_id)
+                    suspended_count = _resuspend_note_cards(collection, note)
+                    if suspended_count > 0:
+                        stats["vocab_suspended"] += suspended_count
+                        existing_lower = {value.lower() for value in note.tags}
+                        if tag_lower not in existing_lower:
+                            _add_tag(note, tag)
+                            note.flush()
+                    continue
+
+                if not note_has_tag:
+                    continue
+
+                suspended_cards = [card_id for card_id, queue in cards if queue == -1]
+                note = _get_note(collection, note_id)
+                changed = False
+                if suspended_cards:
+                    _unsuspend_cards(collection, suspended_cards)
+                    stats["vocab_unsuspended"] += len(suspended_cards)
+                    changed = True
+                if _remove_tag_case_insensitive(note, tag):
+                    changed = True
+                if changed:
+                    note.flush()
+                continue
+
+            if not note_has_tag:
+                continue
+
+            note = _get_note(collection, note_id)
+            suspended_cards = [card_id for card_id, queue in cards if queue == -1]
+            changed = False
+            if suspended_cards:
+                _unsuspend_cards(collection, suspended_cards)
+                stats["vocab_unsuspended"] += len(suspended_cards)
+                changed = True
+            if _remove_tag_case_insensitive(note, tag):
+                changed = True
+            if changed:
+                note.flush()
 
         return stats
 
@@ -1146,9 +1442,11 @@ class KanjiVocabSyncManager:
         if leech_lower and leech_lower in note_tags_lower:
             return 0
 
-        card_rows = collection.db.all(
+        card_rows = _db_all(
+            collection,
             "SELECT id, queue FROM cards WHERE nid = ?",
             note.id,
+            context="unsuspend_note_cards_if_needed",
         )
         to_unsuspend = [card_id for card_id, queue in card_rows if queue == -1]
         if not to_unsuspend:
@@ -1309,6 +1607,11 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
         self.ignore_suspended_check = QCheckBox("Ignore suspended vocab cards")
         self.ignore_suspended_check.setChecked(self.config.ignore_suspended_vocab)
+        self.auto_suspend_check = QCheckBox("Suspend vocab with unreviewed kanji")
+        self.auto_suspend_check.setChecked(self.config.auto_suspend_vocab)
+        self.auto_suspend_tag_edit = QLineEdit(self.config.auto_suspend_tag)
+        self.auto_suspend_tag_edit.setEnabled(self.config.auto_suspend_vocab)
+        self.auto_suspend_check.toggled.connect(self.auto_suspend_tag_edit.setEnabled)
         self.reorder_combo = QComboBox()
         self.reorder_combo.addItem("Frequency (KANJIDIC)", "frequency")
         self.reorder_combo.addItem("Vocabulary order", "vocab")
@@ -1325,6 +1628,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         form.addRow("", self.realtime_check)
         form.addRow("", self.auto_sync_check)
         form.addRow("", self.ignore_suspended_check)
+        form.addRow("", self.auto_suspend_check)
+        form.addRow("Suspension tag", self.auto_suspend_tag_edit)
         form.addRow("Order new kanji cards", self.reorder_combo)
 
         self.tabs.addTab(widget, "General")
@@ -1486,6 +1791,13 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.config.realtime_review = self.realtime_check.isChecked()
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
         self.config.ignore_suspended_vocab = self.ignore_suspended_check.isChecked()
+        auto_suspend_enabled = self.auto_suspend_check.isChecked()
+        auto_suspend_tag = self.auto_suspend_tag_edit.text().strip()
+        if auto_suspend_enabled and not auto_suspend_tag:
+            show_warning("Provide a suspension tag when auto-suspend is enabled.")
+            return False
+        self.config.auto_suspend_vocab = auto_suspend_enabled
+        self.config.auto_suspend_tag = auto_suspend_tag
         self.config.reorder_mode = self.reorder_combo.currentData() or "vocab"
         return True
 
@@ -1692,17 +2004,21 @@ def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> None:
                 return
 
     placeholders = ",".join("?" for _ in card_ids)
-    params: List[object] = [intTime(), collection.usn()] + list(card_ids)
-    collection.db.execute(
+    params: List[object] = [intTime(), collection.usn(), *card_ids]
+    _db_execute(
+        collection,
         f"UPDATE cards SET mod = ?, usn = ?, queue = type WHERE id IN ({placeholders})",
-        params,
+        *params,
+        context="unsuspend_cards",
     )
 
 
 def _resuspend_note_cards(collection: Collection, note: Note) -> int:
-    card_rows = collection.db.all(
+    card_rows = _db_all(
+        collection,
         "SELECT id, queue FROM cards WHERE nid = ?",
         note.id,
+        context="resuspend_note_cards/load",
     )
     to_suspend = [card_id for card_id, queue in card_rows if queue != -1]
     if not to_suspend:
@@ -1717,12 +2033,62 @@ def _resuspend_note_cards(collection: Collection, note: Note) -> int:
                 return len(to_suspend)
 
     placeholders = ",".join("?" for _ in to_suspend)
-    params: List[object] = [intTime(), collection.usn()] + list(to_suspend)
-    collection.db.execute(
+    params: List[object] = [intTime(), collection.usn(), *to_suspend]
+    _db_execute(
+        collection,
         f"UPDATE cards SET mod = ?, usn = ?, queue = -1 WHERE id IN ({placeholders})",
-        params,
+        *params,
+        context="resuspend_note_cards/update",
     )
     return len(to_suspend)
+
+
+def _db_all(
+    collection: Collection,
+    sql: str,
+    *params: object,
+    context: str = "",
+) -> List[Tuple]:
+    try:
+        return collection.db.all(sql, *params)
+    except Exception as err:  # noqa: BLE001
+        _log_db_error("all", sql, params, context, err)
+        raise
+
+
+def _db_execute(
+    collection: Collection,
+    sql: str,
+    *params: object,
+    context: str = "",
+) -> None:
+    try:
+        collection.db.execute(sql, *params)
+    except Exception as err:  # noqa: BLE001
+        _log_db_error("execute", sql, params, context, err)
+        raise
+
+
+def _log_db_error(
+    operation: str,
+    sql: str,
+    params: Sequence[object],
+    context: str,
+    err: Exception,
+) -> None:
+    prefix = "[KanjiCards] db.%s failed" % operation
+    if context:
+        prefix += f" ({context})"
+    print(prefix + f": {err}")
+    print(f"  SQL: {sql}")
+    if params:
+        print(f"  Params: {params}")
+        print(
+            "  Param types: "
+            + tuple(type(param).__name__ for param in params).__str__()
+        )
+    else:
+        print("  Params: ()")
 
 
 def _new_note(collection: Collection, model: NotetypeDict) -> Note:
@@ -1753,3 +2119,16 @@ def _remove_tag(note: Note, tag: str) -> None:
         handler(tag)
         return
     note.removeTag(tag)
+
+
+def _remove_tag_case_insensitive(note: Note, tag: str) -> bool:
+    cleaned = tag.strip()
+    if not cleaned:
+        return False
+    target = cleaned.lower()
+    removed = False
+    for existing in list(note.tags):
+        if existing.lower() == target:
+            _remove_tag(note, existing)
+            removed = True
+    return removed

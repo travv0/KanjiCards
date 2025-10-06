@@ -18,5 +18,7 @@
   "realtime_review": true,
   "unsuspended_tag": "kanjicards_unsuspended",
   "reorder_mode": "vocab",
-  "ignore_suspended_vocab": false
+  "ignore_suspended_vocab": false,
+  "auto_suspend_vocab": false,
+  "auto_suspend_tag": "kanjicards_unreviewed"
 }
