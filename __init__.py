@@ -107,6 +107,14 @@ class AddonConfig:
     auto_run_on_sync: bool
     realtime_review: bool
     unsuspended_tag: str
+    reorder_mode: str
+
+
+@dataclass
+class KanjiUsageInfo:
+    reviewed: bool = False
+    first_reviewed_index: Optional[int] = None
+    first_new_index: Optional[int] = None
 
 
 class KanjiVocabSyncManager:
@@ -159,6 +167,7 @@ class KanjiVocabSyncManager:
             auto_run_on_sync=raw.get("auto_run_on_sync", False),
             realtime_review=raw.get("realtime_review", True),
             unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
+            reorder_mode=raw.get("reorder_mode", "frequency"),
         )
 
     def save_config(self, cfg: AddonConfig) -> None:
@@ -178,6 +187,7 @@ class KanjiVocabSyncManager:
             "auto_run_on_sync": bool(cfg.auto_run_on_sync),
             "realtime_review": bool(cfg.realtime_review),
             "unsuspended_tag": cfg.unsuspended_tag,
+            "reorder_mode": cfg.reorder_mode,
         }
         self.mw.addonManager.writeConfig(__name__, raw)
         self._dictionary_cache = None
@@ -266,13 +276,14 @@ class KanjiVocabSyncManager:
 
         dictionary = self._load_dictionary(cfg.dictionary_file)
 
-        reviewed_kanji = self._collect_reviewed_kanji(collection, vocab_models)
+        usage_info = self._collect_vocab_usage(collection, vocab_models)
+        active_chars = set(usage_info.keys())
 
         existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
 
         stats = self._apply_kanji_updates(
             collection,
-            reviewed_kanji,
+            active_chars,
             dictionary,
             kanji_model,
             kanji_field_indexes,
@@ -281,6 +292,16 @@ class KanjiVocabSyncManager:
             existing_notes,
             prune_existing=True,
         )
+
+        if cfg.reorder_mode in {"frequency", "vocab"}:
+            self._reorder_new_kanji_cards(
+                collection,
+                kanji_model,
+                kanji_field_index,
+                cfg,
+                usage_info,
+                dictionary,
+            )
 
         return stats
 
@@ -362,6 +383,17 @@ class KanjiVocabSyncManager:
             cfg,
             existing_notes,
         )
+
+        if cfg.reorder_mode in {"frequency", "vocab"}:
+            usage_all = self._collect_vocab_usage(collection, list(vocab_map.values()))
+            self._reorder_new_kanji_cards(
+                collection,
+                kanji_model,
+                kanji_field_index,
+                cfg,
+                usage_all,
+                dictionary,
+            )
 
         self._realtime_error_logged = False
 
@@ -556,6 +588,16 @@ class KanjiVocabSyncManager:
             data = json.load(handle)
         if not isinstance(data, dict):
             raise RuntimeError("Dictionary file must contain a JSON object mapping kanji to data")
+        for key, value in data.items():
+            if not isinstance(value, dict):
+                continue
+            freq_val = value.get("frequency")
+            if isinstance(freq_val, str) and freq_val.isdigit():
+                value["frequency"] = int(freq_val)
+            elif isinstance(freq_val, (int, float)):
+                value["frequency"] = int(freq_val)
+            elif "frequency" in value:
+                value["frequency"] = None
         return data
 
     def _load_dictionary_kanjidic(self, path: str) -> Dict[str, Dict[str, object]]:
@@ -611,11 +653,20 @@ class KanjiVocabSyncManager:
                             continue
                         meanings.append(text)
 
+            frequency_value: Optional[int] = None
+            if misc is not None:
+                freq_el = misc.find("freq")
+                if freq_el is not None and freq_el.text:
+                    freq_text = freq_el.text.strip()
+                    if freq_text.isdigit():
+                        frequency_value = int(freq_text)
+
             entry = {
                 "definition": "; ".join(dict.fromkeys(meanings)),
                 "stroke_count": stroke_value,
                 "kunyomi": list(dict.fromkeys(kunyomi)),
                 "onyomi": list(dict.fromkeys(onyomi)),
+                "frequency": frequency_value,
             }
             dictionary[literal] = entry
 
@@ -623,18 +674,17 @@ class KanjiVocabSyncManager:
             raise RuntimeError("No kanji entries were parsed from the dictionary XML")
         return dictionary
 
-    def _collect_reviewed_kanji(
+    def _collect_vocab_usage(
         self,
         collection: Collection,
         vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
-    ) -> Set[str]:
-        reviewed: Set[str] = set()
-        for model, field_indexes in vocab_models:
-            if not field_indexes:
-                continue
-            rows = collection.db.all(
+    ) -> Dict[str, KanjiUsageInfo]:
+        usage: Dict[str, KanjiUsageInfo] = {}
+        reviewed_notes: Set[int] = set()
+        for model, _ in vocab_models:
+            reviewed_ids = collection.db.list(
                 """
-                SELECT DISTINCT notes.id, notes.flds
+                SELECT DISTINCT notes.id
                 FROM notes
                 JOIN cards ON cards.nid = notes.id
                 JOIN revlog ON revlog.cid = cards.id
@@ -642,14 +692,47 @@ class KanjiVocabSyncManager:
                 """,
                 model["id"],
             )
-            for _, flds in rows:
+            reviewed_notes.update(reviewed_ids)
+
+        reviewed_counter = 0
+        new_counter = 0
+        for model, field_indexes in vocab_models:
+            if not field_indexes:
+                continue
+            rows = collection.db.all(
+                "SELECT id, flds FROM notes WHERE mid = ? ORDER BY id",
+                model["id"],
+            )
+            for note_id, flds in rows:
+                is_reviewed = note_id in reviewed_notes
+                if is_reviewed:
+                    reviewed_index = reviewed_counter
+                    reviewed_counter += 1
+                else:
+                    new_index = new_counter
+                    new_counter += 1
                 fields = flds.split("\x1f")
                 for field_index in field_indexes:
                     if field_index >= len(fields):
                         continue
                     value = fields[field_index]
-                    reviewed.update(KANJI_PATTERN.findall(value))
-        return reviewed
+                    chars = KANJI_PATTERN.findall(value)
+                    if not chars:
+                        continue
+                    for char in chars:
+                        info = usage.get(char)
+                        if info is None:
+                            info = KanjiUsageInfo()
+                            usage[char] = info
+                        if is_reviewed:
+                            if not info.reviewed:
+                                info.reviewed = True
+                            if info.first_reviewed_index is None:
+                                info.first_reviewed_index = reviewed_index
+                        else:
+                            if info.first_new_index is None:
+                                info.first_new_index = new_index
+        return usage
 
     def _notify_summary(self, stats: Dict[str, object]) -> None:
         try:
@@ -763,6 +846,90 @@ class KanjiVocabSyncManager:
             if changed:
                 note.flush()
         return removed, resuspended_total
+
+    def _reorder_new_kanji_cards(
+        self,
+        collection: Collection,
+        kanji_model: NotetypeDict,
+        kanji_field_index: int,
+        cfg: AddonConfig,
+        usage_info: Dict[str, KanjiUsageInfo],
+        dictionary: Dict[str, Dict[str, object]],
+    ) -> None:
+        mode = cfg.reorder_mode
+        if mode not in {"frequency", "vocab"}:
+            return
+
+        rows = collection.db.all(
+            """
+            SELECT cards.id, cards.nid, notes.flds
+            FROM cards
+            JOIN notes ON notes.id = cards.nid
+            WHERE notes.mid = ? AND cards.queue = 0
+            """,
+            kanji_model["id"],
+        )
+        if not rows:
+            return
+
+        order_entries: List[Tuple[Tuple, int]] = []
+        for card_id, note_id, flds in rows:
+            fields = flds.split("\x1f")
+            if kanji_field_index >= len(fields):
+                continue
+            kanji_char = fields[kanji_field_index].strip()
+            if not kanji_char:
+                continue
+            info = usage_info.get(kanji_char, KanjiUsageInfo())
+            entry = dictionary.get(kanji_char) or {}
+            freq_val = entry.get("frequency")
+            freq = None
+            if isinstance(freq_val, int):
+                freq = freq_val
+            elif isinstance(freq_val, str) and freq_val.isdigit():
+                freq = int(freq_val)
+
+            key = self._build_reorder_key(mode, info, freq, card_id)
+            order_entries.append((key, card_id))
+
+        if not order_entries:
+            return
+
+        order_entries.sort(key=lambda item: item[0])
+        now = intTime()
+        usn = collection.usn()
+        for position, (_, card_id) in enumerate(order_entries):
+            collection.db.execute(
+                "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
+                position,
+                now,
+                usn,
+                card_id,
+            )
+
+    def _build_reorder_key(
+        self,
+        mode: str,
+        info: KanjiUsageInfo,
+        frequency: Optional[int],
+        card_id: int,
+    ) -> Tuple:
+        big = 10**9
+        reviewed_index = info.first_reviewed_index if info.first_reviewed_index is not None else big
+        new_index = info.first_new_index if info.first_new_index is not None else reviewed_index
+        if new_index is None or isinstance(new_index, str):
+            new_index = big
+
+        if mode == "frequency":
+            if frequency is not None:
+                return (0, frequency, new_index, reviewed_index, card_id)
+            return (1, new_index, reviewed_index, card_id)
+
+        # mode == "vocab"
+        if info.reviewed:
+            freq_sort = frequency if frequency is not None else big
+            return (0, freq_sort, reviewed_index, new_index, card_id)
+        return (1, new_index, frequency if frequency is not None else big, card_id)
 
     def _apply_kanji_updates(
         self,
@@ -1068,6 +1235,13 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.realtime_check.setChecked(self.config.realtime_review)
         self.auto_sync_check = QCheckBox("Run automatically after sync")
         self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
+        self.reorder_combo = QComboBox()
+        self.reorder_combo.addItem("Frequency (KANJIDIC)", "frequency")
+        self.reorder_combo.addItem("Vocabulary order", "vocab")
+        current_mode = self.config.reorder_mode if self.config.reorder_mode in {"frequency", "vocab"} else "frequency"
+        index = self.reorder_combo.findData(current_mode)
+        if index >= 0:
+            self.reorder_combo.setCurrentIndex(index)
 
         form.addRow("Existing kanji tag", self.existing_tag_edit)
         form.addRow("Auto-created kanji tag", self.created_tag_edit)
@@ -1076,6 +1250,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         form.addRow("Kanji deck", self.deck_combo)
         form.addRow("", self.realtime_check)
         form.addRow("", self.auto_sync_check)
+        form.addRow("Order new kanji cards", self.reorder_combo)
 
         self.tabs.addTab(widget, "General")
 
@@ -1235,6 +1410,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.config.unsuspended_tag = self.unsuspend_tag_edit.text().strip()
         self.config.realtime_review = self.realtime_check.isChecked()
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
+        self.config.reorder_mode = self.reorder_combo.currentData() or "frequency"
         return True
 
     def _populate_deck_combo(self) -> None:

@@ -12,6 +12,7 @@ KanjiCards is an Anki add-on that keeps a configured kanji note type in sync wit
 - Unsuspends kanji cards (unless they carry the leech tag) so they return to study if you already have a note for that character.
 - While you review configured vocab cards, the add-on can perform the same tagging/creation/unsuspension automatically in real time (enabled by default).
 - Optionally auto-runs after Anki sync to pick up reviews completed on other devices.
+- Can reorder newly created kanji cards so high-utility characters appear earlier, either by dictionary frequency or by the order you will encounter them in new vocab notes.
 - Offers a GUI settings dialog from Anki’s **Tools** menu for configuring vocab note types, the kanji note type/field mapping, tags, and dictionary file.
 
 ## Installation
@@ -28,6 +29,7 @@ KanjiCards is an Anki add-on that keeps a configured kanji note type in sync wit
      - A full KANJIDIC2 XML file (recommended). The add-on parses the XML and extracts the first stroke count, all Japanese on/kun readings, and English meanings.
    - Optionally pick a specific deck for newly created kanji notes. Leave blank to fall back to the kanji note type’s default deck or your current deck.
    - Set the tag to apply to kanji notes that the add-on unsuspends (default: `kanjicards_unsuspended`). If the note later loses its vocab tag, this marker is removed and the card is resuspended automatically.
+   - Choose how to **Order new kanji cards**: by frequency (KANJIDIC2 rankings) or by vocabulary order (mirroring the order you will see the vocab cards). Frequency sorting places items without frequency data afterward using vocab order; vocabulary sorting puts kanji tied to already-reviewed vocab first (by frequency) and the rest by vocab order.
    - Toggle **Update during reviews** if you want KanjiCards to react instantly while you answer vocab cards.
    - Enable **Run automatically after sync** if you want KanjiCards to rerun once Anki finishes syncing.
 3. **Kanji note tab**
