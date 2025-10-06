@@ -884,7 +884,7 @@ class KanjiVocabSyncManager:
 
         rows = collection.db.all(
             """
-            SELECT cards.id, cards.nid, notes.flds
+            SELECT cards.id, cards.nid, cards.due, cards.did, notes.flds
             FROM cards
             JOIN notes ON notes.id = cards.nid
             WHERE notes.mid = ? AND cards.queue = 0
@@ -894,8 +894,8 @@ class KanjiVocabSyncManager:
         if not rows:
             return
 
-        order_entries: List[Tuple[Tuple, int]] = []
-        for card_id, note_id, flds in rows:
+        entries_by_deck: Dict[int, List[Tuple[Tuple, int, int]]] = {}
+        for card_id, note_id, due_value, deck_id, flds in rows:
             fields = flds.split("\x1f")
             if kanji_field_index >= len(fields):
                 continue
@@ -911,35 +911,41 @@ class KanjiVocabSyncManager:
             elif isinstance(freq_val, str) and freq_val.isdigit():
                 freq = int(freq_val)
 
-            key = self._build_reorder_key(mode, info, freq, card_id)
-            order_entries.append((key, card_id))
+            key = self._build_reorder_key(mode, info, freq, due_value, card_id)
+            entries_by_deck.setdefault(deck_id, []).append((key, card_id, due_value))
 
-        if not order_entries:
+        if not entries_by_deck:
             return
 
-        order_entries.sort(key=lambda item: item[0])
         now = intTime()
         usn = collection.usn()
-        for position, (_, card_id) in enumerate(order_entries):
-            collection.db.execute(
-                "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
-                position,
-                now,
-                usn,
-                card_id,
-            )
+        for deck_id, deck_entries in entries_by_deck.items():
+            if not deck_entries:
+                continue
+            deck_entries.sort(key=lambda item: item[0])
+            for position, (key, card_id, original_due) in enumerate(deck_entries):
+                collection.db.execute(
+                    "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
+                    position,
+                    now,
+                    usn,
+                    card_id,
+                )
 
     def _build_reorder_key(
         self,
         mode: str,
         info: KanjiUsageInfo,
         frequency: Optional[int],
+        due_value: Optional[int],
         card_id: int,
     ) -> Tuple:
         big = 10**9
         reviewed_index = info.first_reviewed_index if info.first_reviewed_index is not None else big
         new_index = info.first_new_index if info.first_new_index is not None else big
-        new_due = info.first_new_due if info.first_new_due is not None else big
+        new_due = due_value if due_value is not None else info.first_new_due
+        if new_due is None:
+            new_due = big
 
         if mode == "frequency":
             if frequency is not None:
