@@ -946,7 +946,7 @@ class KanjiVocabSyncManager:
         big = 10**9
         review_order = info.first_review_order if info.first_review_order is not None else big
         new_order = info.first_new_order if info.first_new_order is not None else big
-        new_due = due_value if due_value is not None else info.first_new_due
+        new_due = info.first_new_due if info.first_new_due is not None else due_value
         if new_due is None:
             new_due = big
 
