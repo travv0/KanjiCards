@@ -118,6 +118,7 @@ class AddonConfig:
 class KanjiUsageInfo:
     reviewed: bool = False
     first_review_order: Optional[int] = None
+    first_review_due: Optional[int] = None
     first_new_due: Optional[int] = None
     first_new_order: Optional[int] = None
 
@@ -774,8 +775,9 @@ class KanjiVocabSyncManager:
                 continue
             sql = (
                 "SELECT notes.id, notes.flds, "
-                "MAX(CASE WHEN cards.reps > 0 THEN 1 ELSE 0 END) AS has_reviewed, "
-                "MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due "
+                "MAX(CASE WHEN cards.type != 0 THEN 1 ELSE 0 END) AS has_reviewed, "
+                "MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due, "
+                "MIN(CASE WHEN cards.type != 0 THEN cards.due END) AS min_review_due "
                 "FROM notes JOIN cards ON cards.nid = notes.id "
                 "WHERE notes.mid = ? GROUP BY notes.id"
             )
@@ -798,7 +800,7 @@ class KanjiVocabSyncManager:
                 note_ids = [row[0] for row in rows]
                 active_map = self._load_note_active_status(collection, note_ids)
 
-            for note_id, flds, has_reviewed, min_new_due in rows:
+            for note_id, flds, has_reviewed, min_new_due, min_review_due in rows:
                 if cfg.ignore_suspended_vocab:
                     has_active = active_map.get(note_id, False)
                     if not has_active:
@@ -829,6 +831,13 @@ class KanjiVocabSyncManager:
                     new_rank = new_order
                     new_order += 1
 
+                review_due_value: Optional[int] = None
+                if min_review_due is not None:
+                    try:
+                        review_due_value = int(min_review_due)
+                    except Exception:
+                        review_due_value = None
+
                 fields = flds.split("\x1f")
                 for field_index in field_indexes:
                     if field_index >= len(fields):
@@ -849,6 +858,11 @@ class KanjiVocabSyncManager:
                                 or review_rank < info.first_review_order
                             ):
                                 info.first_review_order = review_rank
+                            if review_due_value is not None and (
+                                info.first_review_due is None
+                                or review_due_value < info.first_review_due
+                            ):
+                                info.first_review_due = review_due_value
                         if new_due_value is not None and (
                             info.first_new_due is None or new_due_value < info.first_new_due
                         ):
@@ -1061,6 +1075,7 @@ class KanjiVocabSyncManager:
     ) -> Tuple:
         big = 10**9
         review_order = info.first_review_order if info.first_review_order is not None else big
+        review_due = info.first_review_due if info.first_review_due is not None else big
         new_order = info.first_new_order if info.first_new_order is not None else big
         new_due = info.first_new_due if info.first_new_due is not None else due_value
         if new_due is None:
@@ -1072,10 +1087,12 @@ class KanjiVocabSyncManager:
         if has_vocab and info.reviewed:
             vocab_tuple: Tuple = (
                 0,
+                review_due,
                 freq_value,
                 review_order,
                 new_due,
                 new_order,
+                due_sort,
                 card_id,
             )
         elif has_vocab:
@@ -1199,11 +1216,11 @@ class KanjiVocabSyncManager:
         placeholders = ",".join("?" for _ in note_ids)
         rows = _db_all(
             collection,
-            f"SELECT nid, MAX(reps) FROM cards WHERE nid IN ({placeholders}) GROUP BY nid",
+            f"SELECT nid, MAX(CASE WHEN type != 0 THEN 1 ELSE 0 END) FROM cards WHERE nid IN ({placeholders}) GROUP BY nid",
             *note_ids,
             context="compute_kanji_reviewed_flags",
         )
-        status_by_note: Dict[int, bool] = {nid: (max_reps or 0) > 0 for nid, max_reps in rows}
+        status_by_note: Dict[int, bool] = {nid: bool(flag) for nid, flag in rows}
         return {char: status_by_note.get(note_id, False) for char, note_id in existing_notes.items()}
 
     def _fetch_vocab_rows(
