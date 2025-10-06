@@ -7,11 +7,17 @@
       "definition": "",
       "stroke_count": "",
       "kunyomi": "",
-      "onyomi": ""
+      "onyomi": "",
+      "frequency": ""
     }
   },
   "existing_tag": "has_vocab_kanji",
   "created_tag": "auto_kanji_card",
+  "bucket_tags": {
+    "reviewed_vocab": "",
+    "unreviewed_vocab": "",
+    "no_vocab": ""
+  },
   "dictionary_file": "kanjidic2.xml",
   "kanji_deck_name": "",
   "auto_run_on_sync": false,

@@ -85,6 +85,13 @@ except AttributeError:
 KANJI_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]")
 
 
+BUCKET_TAG_KEYS: Tuple[str, str, str] = (
+    "reviewed_vocab",
+    "unreviewed_vocab",
+    "no_vocab",
+)
+
+
 @dataclass
 class VocabNoteTypeConfig:
     name: str
@@ -103,6 +110,7 @@ class AddonConfig:
     kanji_note_type: KanjiNoteTypeConfig
     existing_tag: str
     created_tag: str
+    bucket_tags: Dict[str, str]
     dictionary_file: str
     kanji_deck_name: str
     auto_run_on_sync: bool
@@ -205,6 +213,34 @@ class KanjiVocabSyncManager:
                 merged[key] = value
         return merged
 
+    def _normalize_kanji_fields(self, raw_fields: Optional[Dict[str, object]]) -> Dict[str, str]:
+        result: Dict[str, str] = {}
+        if isinstance(raw_fields, dict):
+            for key, value in raw_fields.items():
+                if isinstance(value, str):
+                    result[key] = value
+                elif value is None:
+                    result[key] = ""
+                else:
+                    result[key] = str(value)
+        for logical_name in ("kanji", "definition", "stroke_count", "kunyomi", "onyomi", "frequency"):
+            result.setdefault(logical_name, "")
+        return result
+
+    def _normalize_bucket_tags(self, raw_tags: Optional[Dict[str, object]]) -> Dict[str, str]:
+        result: Dict[str, str] = {key: "" for key in BUCKET_TAG_KEYS}
+        if not isinstance(raw_tags, dict):
+            return result
+        for key in BUCKET_TAG_KEYS:
+            value = raw_tags.get(key, "")
+            if isinstance(value, str):
+                result[key] = value.strip()
+            elif value is None:
+                result[key] = ""
+            else:
+                result[key] = str(value).strip()
+        return result
+
     def load_config(self) -> AddonConfig:
         global_raw = self.mw.addonManager.getConfig(__name__) or {}
         profile_raw = self._load_profile_config()
@@ -214,15 +250,18 @@ class KanjiVocabSyncManager:
             for item in raw.get("vocab_note_types", [])
         ]
         kanji_cfg_raw = raw.get("kanji_note_type", {})
+        kanji_fields = self._normalize_kanji_fields(kanji_cfg_raw.get("fields"))
         kanji_cfg = KanjiNoteTypeConfig(
             name=kanji_cfg_raw.get("name", ""),
-            fields=kanji_cfg_raw.get("fields", {}),
+            fields=kanji_fields,
         )
+        bucket_tags = self._normalize_bucket_tags(raw.get("bucket_tags"))
         return AddonConfig(
             vocab_note_types=vocab_cfg,
             kanji_note_type=kanji_cfg,
             existing_tag=raw.get("existing_tag", "has_vocab_kanji"),
             created_tag=raw.get("created_tag", "auto_kanji_card"),
+            bucket_tags=bucket_tags,
             dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
             kanji_deck_name=raw.get("kanji_deck_name", ""),
             auto_run_on_sync=raw.get("auto_run_on_sync", False),
@@ -246,6 +285,7 @@ class KanjiVocabSyncManager:
             },
             "existing_tag": cfg.existing_tag,
             "created_tag": cfg.created_tag,
+            "bucket_tags": cfg.bucket_tags,
             "dictionary_file": cfg.dictionary_file,
             "kanji_deck_name": cfg.kanji_deck_name,
             "auto_run_on_sync": bool(cfg.auto_run_on_sync),
@@ -964,6 +1004,75 @@ class KanjiVocabSyncManager:
         note.flush()
         return True, note
 
+    def _apply_bucket_tag_to_note(
+        self,
+        collection: Collection,
+        note_id: int,
+        bucket_id: Optional[int],
+        bucket_tag_map: Dict[int, str],
+        active_bucket_tags: Set[str],
+    ) -> None:
+        target_tag = bucket_tag_map.get(bucket_id, "") if bucket_id is not None else ""
+        target_lower = target_tag.lower() if target_tag else ""
+
+        if not target_tag and not active_bucket_tags:
+            return
+
+        note = _get_note(collection, note_id)
+        changed = False
+
+        for tag in active_bucket_tags:
+            if not tag:
+                continue
+            if target_lower and tag.lower() == target_lower:
+                continue
+            if _remove_tag_case_insensitive(note, tag):
+                changed = True
+
+        if target_tag:
+            existing_lower = {tag.lower() for tag in note.tags}
+            if target_lower not in existing_lower:
+                _add_tag(note, target_tag)
+                changed = True
+
+        if changed:
+            note.flush()
+
+    def _find_notes_with_bucket_tags(
+        self,
+        collection: Collection,
+        active_bucket_tags: Set[str],
+    ) -> Set[int]:
+        if not active_bucket_tags:
+            return set()
+
+        clauses = []
+        params: List[object] = []
+        for tag in active_bucket_tags:
+            if not tag:
+                continue
+            clauses.append("tags LIKE ?")
+            params.append(f"%{tag}%")
+        if not clauses:
+            return set()
+
+        sql = f"SELECT id, tags FROM notes WHERE {' OR '.join(clauses)}"
+        rows = _db_all(
+            collection,
+            sql,
+            *params,
+            context="find_notes_with_bucket_tags",
+        )
+
+        tag_lower_map = {tag.lower(): tag for tag in active_bucket_tags if tag}
+        result: Set[int] = set()
+        for note_id, tags in rows:
+            tag_set = {value for value in tags.strip().split() if value}
+            lower_values = {value.lower() for value in tag_set}
+            if lower_values & set(tag_lower_map.keys()):
+                result.add(note_id)
+        return result
+
     def _remove_unused_tags(
         self,
         collection: Collection,
@@ -1021,7 +1130,15 @@ class KanjiVocabSyncManager:
         if not rows:
             return
 
-        entries: List[Tuple[Tuple, int, int, int, int]] = []
+        bucket_tag_map = {
+            0: cfg.bucket_tags.get("reviewed_vocab", "").strip(),
+            1: cfg.bucket_tags.get("unreviewed_vocab", "").strip(),
+            2: cfg.bucket_tags.get("no_vocab", "").strip(),
+        }
+        active_bucket_tags = {tag for tag in bucket_tag_map.values() if tag}
+        apply_bucket_tags = bool(active_bucket_tags)
+
+        entries: List[Tuple[Tuple, int, int, int, int, int, int]] = []
         for card_id, note_id, due_value, deck_id, original_mod, original_usn, flds in rows:
             fields = flds.split("\x1f")
             if kanji_field_index >= len(fields):
@@ -1042,8 +1159,8 @@ class KanjiVocabSyncManager:
             elif isinstance(freq_val, str) and freq_val.isdigit():
                 freq = int(freq_val)
 
-            key = self._build_reorder_key(mode, info, freq, due_value, card_id, has_vocab)
-            entries.append((key, card_id, due_value, original_mod, original_usn))
+            key, bucket_id = self._build_reorder_key(mode, info, freq, due_value, card_id, has_vocab)
+            entries.append((key, card_id, due_value, original_mod, original_usn, note_id, bucket_id))
 
         if not entries:
             return
@@ -1051,7 +1168,8 @@ class KanjiVocabSyncManager:
         now = intTime()
         usn = collection.usn()
         entries.sort(key=lambda item: item[0])
-        for new_due, (key, card_id, original_due, original_mod, original_usn) in enumerate(entries):
+        processed_notes: Set[int] = set()
+        for new_due, (key, card_id, original_due, original_mod, original_usn, note_id, bucket_id) in enumerate(entries):
             new_mod = now if new_due != original_due else original_mod
             new_usn = usn if new_due != original_due else original_usn
             _db_execute(
@@ -1063,6 +1181,28 @@ class KanjiVocabSyncManager:
                 card_id,
                 context="reorder_new_kanji_cards/update",
             )
+            if apply_bucket_tags and note_id not in processed_notes:
+                self._apply_bucket_tag_to_note(
+                    collection,
+                    note_id,
+                    bucket_id,
+                    bucket_tag_map,
+                    active_bucket_tags,
+                )
+                processed_notes.add(note_id)
+
+        if apply_bucket_tags:
+            tagged_notes = self._find_notes_with_bucket_tags(collection, active_bucket_tags)
+            for note_id in tagged_notes:
+                if note_id in processed_notes:
+                    continue
+                self._apply_bucket_tag_to_note(
+                    collection,
+                    note_id,
+                    None,
+                    bucket_tag_map,
+                    active_bucket_tags,
+                )
 
     def _build_reorder_key(
         self,
@@ -1072,7 +1212,7 @@ class KanjiVocabSyncManager:
         due_value: Optional[int],
         card_id: int,
         has_vocab: bool,
-    ) -> Tuple:
+    ) -> Tuple[Tuple, int]:
         big = 10**9
         review_order = info.first_review_order if info.first_review_order is not None else big
         review_due = info.first_review_due if info.first_review_due is not None else big
@@ -1113,8 +1253,10 @@ class KanjiVocabSyncManager:
                 card_id,
             )
 
+        bucket_id = int(vocab_tuple[0])
+
         if mode == "vocab":
-            return vocab_tuple
+            return vocab_tuple, bucket_id
 
         # mode == "frequency"
         if has_frequency:
@@ -1122,10 +1264,10 @@ class KanjiVocabSyncManager:
                 0,
                 freq_value,
                 card_id,
-            )
+            ), bucket_id
 
         bucket, *rest = vocab_tuple
-        return (1 + bucket, *rest)
+        return (1 + bucket, *rest), bucket_id
 
     def _apply_kanji_updates(
         self,
@@ -1159,8 +1301,18 @@ class KanjiVocabSyncManager:
             existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
 
         unsuspend_tag = cfg.unsuspended_tag
+        frequency_field_name: Optional[str] = None
+        fields_meta = kanji_model.get("flds") if isinstance(kanji_model, dict) else None
+        freq_index = kanji_field_indexes.get("frequency")
+        if isinstance(freq_index, int) and isinstance(fields_meta, list) and 0 <= freq_index < len(fields_meta):
+            field_meta = fields_meta[freq_index]
+            if isinstance(field_meta, dict):
+                freq_name = field_meta.get("name")
+                if isinstance(freq_name, str):
+                    frequency_field_name = freq_name
 
         for kanji_char in unique_chars:
+            dictionary_entry = dictionary.get(kanji_char)
             if kanji_char in existing_notes:
                 note_id = existing_notes[kanji_char]
                 tagged, note = self._ensure_note_tagged(collection, note_id, cfg.existing_tag)
@@ -1169,9 +1321,11 @@ class KanjiVocabSyncManager:
                 unsuspended = self._unsuspend_note_cards_if_needed(collection, note, unsuspend_tag)
                 if unsuspended:
                     stats["unsuspended"] += unsuspended
+                if frequency_field_name and isinstance(dictionary_entry, dict):
+                    if self._update_frequency_field(note, frequency_field_name, dictionary_entry.get("frequency")):
+                        note.flush()
                 continue
 
-            dictionary_entry = dictionary.get(kanji_char)
             if dictionary_entry is None:
                 stats["missing_dictionary"].add(kanji_char)
                 continue
@@ -1416,6 +1570,8 @@ class KanjiVocabSyncManager:
         self._assign_field(note, field_names.get("kunyomi"), kunyomi_value)
         onyomi_value = self._format_readings(entry.get("onyomi"))
         self._assign_field(note, field_names.get("onyomi"), onyomi_value)
+        frequency_value = self._format_frequency_value(entry.get("frequency"))
+        self._assign_field(note, field_names.get("frequency"), frequency_value)
 
         tags: List[str] = []
         if existing_tag:
@@ -1434,6 +1590,35 @@ class KanjiVocabSyncManager:
         if not field_name:
             return
         note[field_name] = value or ""
+
+    def _format_frequency_value(self, value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            return str(int(value))
+        if isinstance(value, str):
+            return value.strip()
+        return str(value)
+
+    def _update_frequency_field(
+        self,
+        note: Note,
+        field_name: Optional[str],
+        value: object,
+    ) -> bool:
+        if not field_name:
+            return False
+        new_value = self._format_frequency_value(value)
+        try:
+            current = note[field_name]
+        except KeyError:
+            current = ""
+        if current == new_value:
+            return False
+        note[field_name] = new_value
+        return True
 
     def _format_readings(self, value: object) -> str:
         if isinstance(value, list):
@@ -1636,6 +1821,9 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         index = self.reorder_combo.findData(current_mode)
         if index >= 0:
             self.reorder_combo.setCurrentIndex(index)
+        self.bucket_reviewed_tag_edit = QLineEdit(self.config.bucket_tags.get("reviewed_vocab", ""))
+        self.bucket_unreviewed_tag_edit = QLineEdit(self.config.bucket_tags.get("unreviewed_vocab", ""))
+        self.bucket_no_vocab_tag_edit = QLineEdit(self.config.bucket_tags.get("no_vocab", ""))
 
         form.addRow("Existing kanji tag", self.existing_tag_edit)
         form.addRow("Auto-created kanji tag", self.created_tag_edit)
@@ -1648,6 +1836,9 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         form.addRow("", self.auto_suspend_check)
         form.addRow("Suspension tag", self.auto_suspend_tag_edit)
         form.addRow("Order new kanji cards", self.reorder_combo)
+        form.addRow("Reviewed vocab bucket tag", self.bucket_reviewed_tag_edit)
+        form.addRow("Unreviewed vocab bucket tag", self.bucket_unreviewed_tag_edit)
+        form.addRow("No vocab bucket tag", self.bucket_no_vocab_tag_edit)
 
         self.tabs.addTab(widget, "General")
 
@@ -1668,6 +1859,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             ("stroke_count", "Stroke count field"),
             ("kunyomi", "Kunyomi field"),
             ("onyomi", "Onyomi field"),
+            ("frequency", "Frequency field"),
         ]:
             combo = QComboBox()
             self.kanji_field_combos[logical_field] = combo
@@ -1816,6 +2008,11 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.config.auto_suspend_vocab = auto_suspend_enabled
         self.config.auto_suspend_tag = auto_suspend_tag
         self.config.reorder_mode = self.reorder_combo.currentData() or "vocab"
+        self.config.bucket_tags = {
+            "reviewed_vocab": self.bucket_reviewed_tag_edit.text().strip(),
+            "unreviewed_vocab": self.bucket_unreviewed_tag_edit.text().strip(),
+            "no_vocab": self.bucket_no_vocab_tag_edit.text().strip(),
+        }
         return True
 
     def _populate_deck_combo(self) -> None:
