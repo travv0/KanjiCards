@@ -12,7 +12,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from anki.collection import Collection
 from anki.models import NotetypeDict
@@ -108,6 +108,11 @@ class KanjiVocabSyncManager:
         if not mw:
             raise RuntimeError("Kanji Vocab Sync requires Anki main window")
         self.mw = mw
+        self._dictionary_cache: Optional[Dict[str, Any]] = None
+        self._existing_notes_cache: Optional[Dict[str, Any]] = None
+        self._kanji_model_cache: Optional[Dict[str, Any]] = None
+        self._vocab_model_cache: Optional[Dict[str, Any]] = None
+        self._realtime_error_logged = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -115,6 +120,7 @@ class KanjiVocabSyncManager:
             # Fallback for development environments where the addon manager does not know the module.
             self.addon_dir = os.path.dirname(__file__)
         self._ensure_menu_actions()
+        self._install_hooks()
         self.mw.addonManager.setConfigAction(__name__, self.show_settings)
 
     # ------------------------------------------------------------------
@@ -154,6 +160,11 @@ class KanjiVocabSyncManager:
             "dictionary_file": cfg.dictionary_file,
         }
         self.mw.addonManager.writeConfig(__name__, raw)
+        self._dictionary_cache = None
+        self._existing_notes_cache = None
+        self._kanji_model_cache = None
+        self._vocab_model_cache = None
+        self._realtime_error_logged = False
 
     # ------------------------------------------------------------------
     # UI wiring
@@ -167,6 +178,13 @@ class KanjiVocabSyncManager:
         settings_action = menu.addAction("Kanji Vocab Sync Settings")
         settings_action.triggered.connect(self.show_settings)
         self._settings_action = settings_action
+
+    def _install_hooks(self) -> None:
+        try:
+            gui_hooks.reviewer_did_answer_card.remove(self._on_reviewer_did_answer_card)
+        except (ValueError, AttributeError):
+            pass
+        gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
 
     def show_settings(self) -> None:
         dialog = KanjiVocabSyncSettingsDialog(self, self.load_config())
@@ -212,16 +230,7 @@ class KanjiVocabSyncManager:
         if not cfg.kanji_note_type.name:
             raise RuntimeError("Kanji note type is not configured yet")
 
-        kanji_model = collection.models.byName(cfg.kanji_note_type.name)
-        if kanji_model is None:
-            raise RuntimeError(f"Kanji note type '{cfg.kanji_note_type.name}' was not found")
-        kanji_field_indexes = self._resolve_field_indexes(kanji_model, cfg.kanji_note_type.fields)
-        kanji_field_name = cfg.kanji_note_type.fields.get("kanji", "")
-        if not kanji_field_name:
-            raise RuntimeError("Kanji field mapping is missing in the Kanji note configuration")
-        kanji_field_index = kanji_field_indexes.get("kanji")
-        if kanji_field_index is None:
-            raise RuntimeError(f"Kanji field '{kanji_field_name}' was not found in note type '{kanji_model['name']}'")
+        kanji_model, kanji_field_indexes, kanji_field_index = self._get_kanji_model_context(collection, cfg)
 
         vocab_models = self._resolve_vocab_models(collection, cfg)
         if not vocab_models:
@@ -231,48 +240,146 @@ class KanjiVocabSyncManager:
 
         reviewed_kanji = self._collect_reviewed_kanji(collection, vocab_models)
 
-        existing_notes = self._index_existing_kanji_notes(collection, kanji_model, kanji_field_index)
+        existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
 
-        stats = {
-            "kanji_scanned": len(reviewed_kanji),
-            "existing_tagged": 0,
-            "created": 0,
-            "unsuspended": 0,
-            "missing_dictionary": set(),
-        }
-
-        for kanji_char in reviewed_kanji:
-            if kanji_char in existing_notes:
-                note_id = existing_notes[kanji_char]
-                tagged, note = self._ensure_note_tagged(collection, note_id, cfg.existing_tag)
-                if tagged:
-                    stats["existing_tagged"] += 1
-                unsuspended = self._unsuspend_note_cards_if_needed(collection, note)
-                if unsuspended:
-                    stats["unsuspended"] += unsuspended
-                continue
-
-            dictionary_entry = dictionary.get(kanji_char)
-            if dictionary_entry is None:
-                stats["missing_dictionary"].add(kanji_char)
-                continue
-
-            if self._create_kanji_note(
-                collection,
-                kanji_model,
-                kanji_field_indexes,
-                dictionary_entry,
-                kanji_char,
-                cfg.existing_tag,
-                cfg.created_tag,
-            ):
-                stats["created"] += 1
+        stats = self._apply_kanji_updates(
+            collection,
+            reviewed_kanji,
+            dictionary,
+            kanji_model,
+            kanji_field_indexes,
+            kanji_field_index,
+            cfg,
+            existing_notes,
+        )
 
         return stats
+
+    def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
+        if not card:
+            return
+        if self.mw.col is None:
+            return
+        try:
+            self._process_reviewed_card(card)
+        except Exception as err:  # noqa: BLE001
+            if not self._realtime_error_logged:
+                print(f"[KanjiCards] realtime sync error: {err}")
+                self._realtime_error_logged = True
+
+    def _process_reviewed_card(self, card: Any) -> None:
+        collection = self.mw.col
+        if collection is None:
+            return
+
+        cfg = self.load_config()
+        if not cfg.vocab_note_types:
+            return
+
+        try:
+            kanji_model, kanji_field_indexes, kanji_field_index = self._get_kanji_model_context(collection, cfg)
+        except RuntimeError:
+            # Configuration incomplete; wait until user configures properly.
+            return
+
+        vocab_map = self._get_vocab_model_map(collection, cfg)
+        if not vocab_map:
+            return
+
+        try:
+            note = card.note()
+        except Exception:  # noqa: BLE001
+            return
+
+        model_info = vocab_map.get(note.mid)
+        if not model_info:
+            return
+        _, field_indexes = model_info
+        if not field_indexes:
+            return
+
+        try:
+            fields = list(note.fields)
+        except Exception:  # noqa: BLE001
+            fields = note.split_fields() if hasattr(note, "split_fields") else []
+
+        kanji_chars: Set[str] = set()
+        for field_index in field_indexes:
+            if field_index < len(fields):
+                kanji_chars.update(KANJI_PATTERN.findall(fields[field_index]))
+
+        if not kanji_chars:
+            return
+
+        try:
+            dictionary = self._load_dictionary(cfg.dictionary_file)
+        except Exception as err:  # noqa: BLE001
+            if not self._realtime_error_logged:
+                print(f"[KanjiCards] dictionary load failed during review: {err}")
+                self._realtime_error_logged = True
+            return
+
+        existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
+
+        self._apply_kanji_updates(
+            collection,
+            kanji_chars,
+            dictionary,
+            kanji_model,
+            kanji_field_indexes,
+            kanji_field_index,
+            cfg,
+            existing_notes,
+        )
+
+        self._realtime_error_logged = False
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _get_kanji_model_context(
+        self,
+        collection: Collection,
+        cfg: AddonConfig,
+    ) -> Tuple[NotetypeDict, Dict[str, int], int]:
+        if not cfg.kanji_note_type.name:
+            raise RuntimeError("Kanji note type is not configured yet")
+
+        key = (
+            cfg.kanji_note_type.name,
+            tuple(sorted(cfg.kanji_note_type.fields.items())),
+        )
+        cache = self._kanji_model_cache
+        if cache and cache.get("key") == key:
+            return (
+                cache["model"],
+                cache["field_indexes"],
+                cache["kanji_field_index"],
+            )
+
+        kanji_model = collection.models.byName(cfg.kanji_note_type.name)
+        if kanji_model is None:
+            raise RuntimeError(f"Kanji note type '{cfg.kanji_note_type.name}' was not found")
+        kanji_field_indexes = self._resolve_field_indexes(kanji_model, cfg.kanji_note_type.fields)
+        kanji_field_name = cfg.kanji_note_type.fields.get("kanji", "")
+        if not kanji_field_name:
+            raise RuntimeError("Kanji field mapping is missing in the Kanji note configuration")
+        kanji_field_index = kanji_field_indexes.get("kanji")
+        if kanji_field_index is None:
+            raise RuntimeError(
+                f"Kanji field '{kanji_field_name}' was not found in note type '{kanji_model['name']}'"
+            )
+
+        self._kanji_model_cache = {
+            "key": key,
+            "model": kanji_model,
+            "field_indexes": kanji_field_indexes,
+            "kanji_field_index": kanji_field_index,
+        }
+        self._existing_notes_cache = None
+
+        return kanji_model, kanji_field_indexes, kanji_field_index
+
     def _resolve_field_indexes(
         self,
         model: NotetypeDict,
@@ -312,6 +419,27 @@ class KanjiVocabSyncManager:
             vocab_models.append((model, field_indexes))
         return vocab_models
 
+    def _get_vocab_model_map(
+        self,
+        collection: Collection,
+        cfg: AddonConfig,
+    ) -> Dict[int, Tuple[NotetypeDict, List[int]]]:
+        key = tuple(
+            sorted(
+                (entry.name, tuple(entry.fields))
+                for entry in cfg.vocab_note_types
+                if entry.name
+            )
+        )
+        cache = self._vocab_model_cache
+        if cache and cache.get("key") == key:
+            return cache["mapping"]
+
+        vocab_models = self._resolve_vocab_models(collection, cfg)
+        mapping = {model["id"]: (model, field_indexes) for model, field_indexes in vocab_models}
+        self._vocab_model_cache = {"key": key, "mapping": mapping}
+        return mapping
+
     def _load_dictionary(self, file_name: str) -> Dict[str, Dict[str, object]]:
         if not file_name:
             raise RuntimeError("Dictionary file path is not configured")
@@ -321,16 +449,23 @@ class KanjiVocabSyncManager:
         if not os.path.exists(path):
             raise RuntimeError(f"Dictionary file not found at '{path}'")
         lower_path = path.lower()
-        if lower_path.endswith(".json"):
-            return self._load_dictionary_json(path)
-        if lower_path.endswith(".xml"):
-            return self._load_dictionary_kanjidic(path)
+        mtime = os.path.getmtime(path)
+        cache = self._dictionary_cache
+        if cache and cache.get("path") == path and cache.get("mtime") == mtime:
+            return cache["data"]
 
-        # Fallback: attempt XML first, then JSON
-        try:
-            return self._load_dictionary_kanjidic(path)
-        except Exception:
-            return self._load_dictionary_json(path)
+        if lower_path.endswith(".json"):
+            data = self._load_dictionary_json(path)
+        elif lower_path.endswith(".xml"):
+            data = self._load_dictionary_kanjidic(path)
+        else:
+            try:
+                data = self._load_dictionary_kanjidic(path)
+            except Exception:
+                data = self._load_dictionary_json(path)
+
+        self._dictionary_cache = {"path": path, "mtime": mtime, "data": data}
+        return data
 
     def _load_dictionary_json(self, path: str) -> Dict[str, Dict[str, object]]:
         with open(path, "r", encoding="utf-8") as handle:
@@ -452,6 +587,20 @@ class KanjiVocabSyncManager:
                 mapping[value] = note_id
         return mapping
 
+    def _get_existing_kanji_notes(
+        self,
+        collection: Collection,
+        kanji_model: NotetypeDict,
+        kanji_field_index: int,
+    ) -> Dict[str, int]:
+        key = (kanji_model["id"], kanji_field_index)
+        cache = self._existing_notes_cache
+        if cache and cache.get("key") == key:
+            return cache["mapping"]
+        mapping = self._index_existing_kanji_notes(collection, kanji_model, kanji_field_index)
+        self._existing_notes_cache = {"key": key, "mapping": mapping}
+        return mapping
+
     def _ensure_note_tagged(self, collection: Collection, note_id: int, tag: str) -> Tuple[bool, Note]:
         note = _get_note(collection, note_id)
         if not tag:
@@ -462,6 +611,63 @@ class KanjiVocabSyncManager:
         note.flush()
         return True, note
 
+    def _apply_kanji_updates(
+        self,
+        collection: Collection,
+        kanji_chars: Union[Sequence[str], Set[str]],
+        dictionary: Dict[str, Dict[str, object]],
+        kanji_model: NotetypeDict,
+        kanji_field_indexes: Dict[str, int],
+        kanji_field_index: int,
+        cfg: AddonConfig,
+        existing_notes: Optional[Dict[str, int]] = None,
+    ) -> Dict[str, object]:
+        unique_chars: Set[str] = {char for char in kanji_chars if char}
+        stats = {
+            "kanji_scanned": len(unique_chars),
+            "existing_tagged": 0,
+            "created": 0,
+            "unsuspended": 0,
+            "missing_dictionary": set(),
+        }
+
+        if not unique_chars:
+            return stats
+
+        if existing_notes is None:
+            existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
+
+        for kanji_char in unique_chars:
+            if kanji_char in existing_notes:
+                note_id = existing_notes[kanji_char]
+                tagged, note = self._ensure_note_tagged(collection, note_id, cfg.existing_tag)
+                if tagged:
+                    stats["existing_tagged"] += 1
+                unsuspended = self._unsuspend_note_cards_if_needed(collection, note)
+                if unsuspended:
+                    stats["unsuspended"] += unsuspended
+                continue
+
+            dictionary_entry = dictionary.get(kanji_char)
+            if dictionary_entry is None:
+                stats["missing_dictionary"].add(kanji_char)
+                continue
+
+            created_note_id = self._create_kanji_note(
+                collection,
+                kanji_model,
+                kanji_field_indexes,
+                dictionary_entry,
+                kanji_char,
+                cfg.existing_tag,
+                cfg.created_tag,
+            )
+            if created_note_id:
+                stats["created"] += 1
+                existing_notes[kanji_char] = created_note_id
+
+        return stats
+
     def _create_kanji_note(
         self,
         collection: Collection,
@@ -471,7 +677,7 @@ class KanjiVocabSyncManager:
         kanji_char: str,
         existing_tag: str,
         created_tag: str,
-    ) -> bool:
+    ) -> Optional[int]:
         note = _new_note(collection, kanji_model)
         field_names = {logical: kanji_model["flds"][idx]["name"] for logical, idx in field_indexes.items()}
 
@@ -498,8 +704,8 @@ class KanjiVocabSyncManager:
 
         deck_id = self._resolve_deck_id(collection, kanji_model)
         if not _add_note(collection, note, deck_id):
-            return False
-        return True
+            return None
+        return getattr(note, "id", None)
 
     def _assign_field(self, note: Note, field_name: Optional[str], value: str) -> None:
         if not field_name:
