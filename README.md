@@ -9,6 +9,7 @@ KanjiCards is an Anki add-on that keeps a configured kanji note type in sync wit
 - Automatically populates kanji notes with character, meaning, stroke count, kunyomi, and onyomi data taken from a configured dictionary (KANJIDIC2 XML or a JSON mapping).
 - Unsuspends kanji cards (unless they carry the leech tag) so they return to study if you already have a note for that character.
 - While you review configured vocab cards, the add-on performs the same tagging/creation/unsuspension automatically in real time.
+- Optionally auto-runs after Anki sync to pick up reviews completed on other devices.
 - Offers a GUI settings dialog from Anki’s **Tools** menu for configuring vocab note types, the kanji note type/field mapping, tags, and dictionary file.
 
 ## Installation
@@ -24,6 +25,7 @@ KanjiCards is an Anki add-on that keeps a configured kanji note type in sync wit
      - A JSON file mapping kanji to the fields `definition`, `stroke_count`, `kunyomi`, and `onyomi`, or
      - A full KANJIDIC2 XML file (recommended). The add-on parses the XML and extracts the first stroke count, all Japanese on/kun readings, and English meanings.
    - Optionally pick a specific deck for newly created kanji notes. Leave blank to fall back to the kanji note type’s default deck or your current deck.
+   - Enable **Run automatically after sync** if you want KanjiCards to rerun once Anki finishes syncing.
 3. **Kanji note tab**
    - Select the kanji note type and assign which fields store each piece of data (kanji, definition, stroke count, kunyomi, onyomi).
 4. **Vocab notes tab**

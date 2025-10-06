@@ -21,6 +21,7 @@ from anki.utils import intTime
 from aqt import gui_hooks, mw
 from aqt.qt import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -34,6 +35,7 @@ from aqt.qt import (
     QPushButton,
     QTabWidget,
     Qt,
+    QTimer,
     QWidget,
     QVBoxLayout,
 )
@@ -100,6 +102,7 @@ class AddonConfig:
     created_tag: str
     dictionary_file: str
     kanji_deck_name: str
+    auto_run_on_sync: bool
 
 
 class KanjiVocabSyncManager:
@@ -115,6 +118,8 @@ class KanjiVocabSyncManager:
         self._vocab_model_cache: Optional[Dict[str, Any]] = None
         self._realtime_error_logged = False
         self._missing_deck_logged = False
+        self._sync_hook_installed = False
+        self._sync_hook_target: Optional[str] = None
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -123,6 +128,7 @@ class KanjiVocabSyncManager:
             self.addon_dir = os.path.dirname(__file__)
         self._ensure_menu_actions()
         self._install_hooks()
+        self._install_sync_hook()
         self.mw.addonManager.setConfigAction(__name__, self.show_settings)
 
     # ------------------------------------------------------------------
@@ -146,6 +152,7 @@ class KanjiVocabSyncManager:
             created_tag=raw.get("created_tag", "auto_kanji_card"),
             dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
             kanji_deck_name=raw.get("kanji_deck_name", ""),
+            auto_run_on_sync=raw.get("auto_run_on_sync", False),
         )
 
     def save_config(self, cfg: AddonConfig) -> None:
@@ -162,6 +169,7 @@ class KanjiVocabSyncManager:
             "created_tag": cfg.created_tag,
             "dictionary_file": cfg.dictionary_file,
             "kanji_deck_name": cfg.kanji_deck_name,
+            "auto_run_on_sync": bool(cfg.auto_run_on_sync),
         }
         self.mw.addonManager.writeConfig(__name__, raw)
         self._dictionary_cache = None
@@ -170,6 +178,9 @@ class KanjiVocabSyncManager:
         self._vocab_model_cache = None
         self._realtime_error_logged = False
         self._missing_deck_logged = False
+        self._sync_hook_installed = False
+        self._sync_hook_target = None
+        self._install_sync_hook()
 
     # ------------------------------------------------------------------
     # UI wiring
@@ -190,6 +201,23 @@ class KanjiVocabSyncManager:
         except (ValueError, AttributeError):
             pass
         gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
+        self._install_sync_hook()
+
+    def _install_sync_hook(self) -> None:
+        if self._sync_hook_installed:
+            return
+        for hook_name in ("sync_did_finish", "sync_will_start"):
+            hook = getattr(gui_hooks, hook_name, None)
+            if hook is None:
+                continue
+            try:
+                hook.remove(self._on_sync_event)
+            except (ValueError, AttributeError):
+                pass
+            hook.append(self._on_sync_event)
+            self._sync_hook_installed = True
+            self._sync_hook_target = hook_name
+            break
 
     def show_settings(self) -> None:
         dialog = KanjiVocabSyncSettingsDialog(self, self.load_config())
@@ -338,6 +366,28 @@ class KanjiVocabSyncManager:
         )
 
         self._realtime_error_logged = False
+
+    def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
+        cfg = self.load_config()
+        if not cfg.auto_run_on_sync:
+            return
+        if not self.mw or not self.mw.col:
+            return
+
+        def trigger() -> None:
+            if not self.mw or not self.mw.col:
+                return
+            busy_check = getattr(self.mw.progress, "busy", None)
+            if callable(busy_check) and busy_check():
+                QTimer.singleShot(200, trigger)
+                return
+            self._realtime_error_logged = False
+            self.run_sync()
+
+        try:
+            self.mw.taskman.run_on_main(trigger)
+        except Exception:
+            trigger()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -873,11 +923,14 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.dictionary_edit = QLineEdit(self.config.dictionary_file)
         self.deck_combo = QComboBox()
         self._populate_deck_combo()
+        self.auto_sync_check = QCheckBox("Run automatically after sync")
+        self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
 
         form.addRow("Existing kanji tag", self.existing_tag_edit)
         form.addRow("Auto-created kanji tag", self.created_tag_edit)
         form.addRow("Dictionary file", self.dictionary_edit)
         form.addRow("Kanji deck", self.deck_combo)
+        form.addRow("", self.auto_sync_check)
 
         self.tabs.addTab(widget, "General")
 
@@ -1034,6 +1087,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             return False
         deck_name = self.deck_combo.currentData()
         self.config.kanji_deck_name = deck_name.strip() if isinstance(deck_name, str) else ""
+        self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
         return True
 
     def _populate_deck_combo(self) -> None:
