@@ -115,6 +115,7 @@ class KanjiUsageInfo:
     reviewed: bool = False
     first_reviewed_index: Optional[int] = None
     first_new_index: Optional[int] = None
+    first_new_due: Optional[int] = None
 
 
 class KanjiVocabSyncManager:
@@ -709,8 +710,24 @@ class KanjiVocabSyncManager:
                     reviewed_index = reviewed_counter
                     reviewed_counter += 1
                 else:
+                    reviewed_index = None
+
+                new_due = collection.db.scalar(
+                    "SELECT MIN(due) FROM cards WHERE nid = ? AND queue = 0",
+                    note_id,
+                )
+                if new_due is not None:
+                    try:
+                        new_due = int(new_due)
+                    except Exception:
+                        new_due = None
+
+                if not is_reviewed:
                     new_index = new_counter
                     new_counter += 1
+                else:
+                    new_index = None
+
                 fields = flds.split("\x1f")
                 for field_index in field_indexes:
                     if field_index >= len(fields):
@@ -725,13 +742,18 @@ class KanjiVocabSyncManager:
                             info = KanjiUsageInfo()
                             usage[char] = info
                         if is_reviewed:
-                            if not info.reviewed:
-                                info.reviewed = True
-                            if info.first_reviewed_index is None:
+                            info.reviewed = True
+                            if reviewed_index is not None and (
+                                info.first_reviewed_index is None
+                                or reviewed_index < info.first_reviewed_index
+                            ):
                                 info.first_reviewed_index = reviewed_index
-                        else:
-                            if info.first_new_index is None:
-                                info.first_new_index = new_index
+                        if new_due is not None and (
+                            info.first_new_due is None or new_due < info.first_new_due
+                        ):
+                            info.first_new_due = new_due
+                        if new_index is not None and info.first_new_index is None:
+                            info.first_new_index = new_index
         return usage
 
     def _notify_summary(self, stats: Dict[str, object]) -> None:
@@ -916,20 +938,19 @@ class KanjiVocabSyncManager:
     ) -> Tuple:
         big = 10**9
         reviewed_index = info.first_reviewed_index if info.first_reviewed_index is not None else big
-        new_index = info.first_new_index if info.first_new_index is not None else reviewed_index
-        if new_index is None or isinstance(new_index, str):
-            new_index = big
+        new_index = info.first_new_index if info.first_new_index is not None else big
+        new_due = info.first_new_due if info.first_new_due is not None else big
 
         if mode == "frequency":
             if frequency is not None:
-                return (0, frequency, new_index, reviewed_index, card_id)
-            return (1, new_index, reviewed_index, card_id)
+                return (0, frequency, new_due, new_index, reviewed_index, card_id)
+            return (1, new_due, new_index, reviewed_index, card_id)
 
         # mode == "vocab"
         if info.reviewed:
             freq_sort = frequency if frequency is not None else big
-            return (0, freq_sort, reviewed_index, new_index, card_id)
-        return (1, new_index, frequency if frequency is not None else big, card_id)
+            return (0, freq_sort, reviewed_index, new_due, new_index, card_id)
+        return (1, new_due, frequency if frequency is not None else big, new_index, card_id)
 
     def _apply_kanji_updates(
         self,
