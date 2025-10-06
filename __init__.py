@@ -113,9 +113,9 @@ class AddonConfig:
 @dataclass
 class KanjiUsageInfo:
     reviewed: bool = False
-    first_reviewed_index: Optional[int] = None
-    first_new_index: Optional[int] = None
+    first_review_order: Optional[int] = None
     first_new_due: Optional[int] = None
+    first_new_order: Optional[int] = None
 
 
 class KanjiVocabSyncManager:
@@ -681,52 +681,48 @@ class KanjiVocabSyncManager:
         vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
     ) -> Dict[str, KanjiUsageInfo]:
         usage: Dict[str, KanjiUsageInfo] = {}
-        reviewed_notes: Set[int] = set()
-        for model, _ in vocab_models:
-            reviewed_ids = collection.db.list(
-                """
-                SELECT DISTINCT notes.id
-                FROM notes
-                JOIN cards ON cards.nid = notes.id
-                JOIN revlog ON revlog.cid = cards.id
-                WHERE notes.mid = ?
-                """,
-                model["id"],
-            )
-            reviewed_notes.update(reviewed_ids)
-
-        reviewed_counter = 0
-        new_counter = 0
+        review_order = 0
+        new_order = 0
         for model, field_indexes in vocab_models:
             if not field_indexes:
                 continue
             rows = collection.db.all(
-                "SELECT id, flds FROM notes WHERE mid = ? ORDER BY id",
+                """
+                SELECT notes.id,
+                       notes.flds,
+                       MAX(CASE WHEN cards.queue != 0 THEN 1 ELSE 0 END) AS has_reviewed,
+                       MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due
+                FROM notes
+                JOIN cards ON cards.nid = notes.id
+                WHERE notes.mid = ?
+                GROUP BY notes.id
+                """,
                 model["id"],
             )
-            for note_id, flds in rows:
-                is_reviewed = note_id in reviewed_notes
-                if is_reviewed:
-                    reviewed_index = reviewed_counter
-                    reviewed_counter += 1
-                else:
-                    reviewed_index = None
+            rows.sort(key=lambda row: (
+                0 if row[3] is not None else 1,
+                row[3] if row[3] is not None else 0,
+                row[0],
+            ))
 
-                new_due = collection.db.scalar(
-                    "SELECT MIN(due) FROM cards WHERE nid = ? AND queue = 0",
-                    note_id,
-                )
-                if new_due is not None:
+            for note_id, flds, has_reviewed, min_new_due in rows:
+                reviewed_flag = bool(has_reviewed)
+                review_rank = None
+                if reviewed_flag:
+                    review_rank = review_order
+                    review_order += 1
+
+                new_due_value: Optional[int] = None
+                if min_new_due is not None:
                     try:
-                        new_due = int(new_due)
+                        new_due_value = int(min_new_due)
                     except Exception:
-                        new_due = None
+                        new_due_value = None
 
-                if not is_reviewed:
-                    new_index = new_counter
-                    new_counter += 1
-                else:
-                    new_index = None
+                new_rank = None
+                if new_due_value is not None:
+                    new_rank = new_order
+                    new_order += 1
 
                 fields = flds.split("\x1f")
                 for field_index in field_indexes:
@@ -741,19 +737,21 @@ class KanjiVocabSyncManager:
                         if info is None:
                             info = KanjiUsageInfo()
                             usage[char] = info
-                        if is_reviewed:
+                        if reviewed_flag:
                             info.reviewed = True
-                            if reviewed_index is not None and (
-                                info.first_reviewed_index is None
-                                or reviewed_index < info.first_reviewed_index
+                            if review_rank is not None and (
+                                info.first_review_order is None
+                                or review_rank < info.first_review_order
                             ):
-                                info.first_reviewed_index = reviewed_index
-                        if new_due is not None and (
-                            info.first_new_due is None or new_due < info.first_new_due
+                                info.first_review_order = review_rank
+                        if new_due_value is not None and (
+                            info.first_new_due is None or new_due_value < info.first_new_due
                         ):
-                            info.first_new_due = new_due
-                        if new_index is not None and info.first_new_index is None:
-                            info.first_new_index = new_index
+                            info.first_new_due = new_due_value
+                        if new_rank is not None and (
+                            info.first_new_order is None or new_rank < info.first_new_order
+                        ):
+                            info.first_new_order = new_rank
         return usage
 
     def _notify_summary(self, stats: Dict[str, object]) -> None:
@@ -946,22 +944,22 @@ class KanjiVocabSyncManager:
         card_id: int,
     ) -> Tuple:
         big = 10**9
-        reviewed_index = info.first_reviewed_index if info.first_reviewed_index is not None else big
-        new_index = info.first_new_index if info.first_new_index is not None else big
+        review_order = info.first_review_order if info.first_review_order is not None else big
+        new_order = info.first_new_order if info.first_new_order is not None else big
         new_due = due_value if due_value is not None else info.first_new_due
         if new_due is None:
             new_due = big
 
         if mode == "frequency":
             if frequency is not None:
-                return (0, frequency, new_due, new_index, reviewed_index, card_id)
-            return (1, new_due, new_index, reviewed_index, card_id)
+                return (0, frequency, new_due, review_order, new_order, card_id)
+            return (1, new_due, new_order, review_order, card_id)
 
         # mode == "vocab"
         if info.reviewed:
             freq_sort = frequency if frequency is not None else big
-            return (0, freq_sort, reviewed_index, new_due, new_index, card_id)
-        return (1, new_due, frequency if frequency is not None else big, new_index, card_id)
+            return (0, freq_sort, review_order, new_due, new_order, card_id)
+        return (1, new_due, new_order, frequency if frequency is not None else big, card_id)
 
     def _apply_kanji_updates(
         self,
