@@ -153,7 +153,7 @@ class KanjiVocabSyncManager:
         self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
         self._last_question_card_id: Optional[int] = None
         self._debug_path: Optional[str] = None
-        self._debug_enabled = True
+        self._debug_enabled = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
