@@ -47,6 +47,11 @@ def test_normalize_bucket_tags_trim(manager):
     assert normalized["no_vocab"] == ""
 
 
+def test_normalize_bucket_tags_default(manager):
+    normalized = manager._normalize_bucket_tags(None)
+    assert normalized == {"reviewed_vocab": "", "unreviewed_vocab": "", "no_vocab": ""}
+
+
 def test_config_roundtrip(manager, kanjicards_module):
     raw = {
         "vocab_note_types": [
@@ -80,6 +85,16 @@ def test_config_roundtrip(manager, kanjicards_module):
     assert serialized["existing_tag"] == "has_vocab_kanji"
     assert serialized["kanji_note_type"]["fields"]["kanji"] == "Character"
     assert serialized["bucket_tags"]["reviewed_vocab"] == "rev"
+
+
+def test_config_from_raw_handles_invalid_entries(manager):
+    raw = {
+        "vocab_note_types": ["bad", {"note_type": "Valid", "fields": ["Front"]}],
+        "kanji_note_type": ["not a dict"],
+    }
+    cfg = manager._config_from_raw(raw)
+    assert cfg.vocab_note_types[0].name == "Valid"
+    assert cfg.kanji_note_type.name == ""
 
 
 def test_load_dictionary_json_frequency_normalization(manager):

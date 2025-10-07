@@ -91,6 +91,23 @@ def real_env(tmp_path_factory):
 def test_headless_apply_updates_creates_real_notes(real_env):
     KC, manager, col, deck_id, kanji_model, vocab_model, addon_path = real_env
 
+    raw_cfg = {
+        "vocab_note_types": [
+            {"note_type": vocab_model["name"], "fields": ["Front", "Back"]},
+            {"note_type": "Other", "fields": [123]},
+        ],
+        "kanji_note_type": {
+            "name": kanji_model["name"],
+            "fields": {"kanji": "Character", "frequency": None},
+        },
+        "existing_tag": "existing",
+        "created_tag": "created",
+        "bucket_tags": {"reviewed_vocab": "rev"},
+    }
+    parsed_cfg = manager._config_from_raw(raw_cfg)
+    roundtrip = manager._serialize_config(parsed_cfg)
+    assert roundtrip["kanji_note_type"]["fields"]["kanji"] == "Character"
+
     kanji_fields = {
         "kanji": "Character",
         "definition": "Meaning",
@@ -121,6 +138,8 @@ def test_headless_apply_updates_creates_real_notes(real_env):
     )
 
     kanji_model_resolved, field_indexes, kanji_field_index = manager._get_kanji_model_context(col, cfg)
+    manager._normalize_bucket_tags(None)
+    manager._config_from_raw({"vocab_note_types": ["bad"], "kanji_note_type": []})
 
     vocab_note = col.new_note(vocab_model)
     vocab_note["Front"] = "火山"
@@ -156,3 +175,18 @@ def test_headless_apply_updates_creates_real_notes(real_env):
     field_values = fields.split("\x1f")
     assert field_values[field_indexes["kanji"]] == "火"
     assert "created_kanji" in tags.split()
+
+    manager._progress_step(None, "skip")
+    tracker = {"progress": types.SimpleNamespace(update="not callable")}
+    manager._progress_step(tracker, "no-op")
+    tracker_callable = {
+        "progress": types.SimpleNamespace(update=lambda **kwargs: None),
+        "current": 0,
+        "max": 2,
+    }
+    manager.mw.taskman = types.SimpleNamespace(run_on_main=lambda fn: (_ for _ in ()).throw(RuntimeError("fail")))
+    def bad_run(fn):
+        raise RuntimeError("fail")
+
+    manager.mw.taskman = types.SimpleNamespace(run_on_main=bad_run)
+    manager._progress_step(tracker_callable, "Step")

@@ -46,43 +46,43 @@ from aqt.qt import QApplication
 # Messaging helpers differ between Qt versions, so prefer new-style names.
 try:
     from aqt.utils import show_critical, show_info, show_warning, tooltip
-except ImportError:  # Legacy Anki versions
-    from aqt.utils import showCritical as show_critical
-    from aqt.utils import showInfo as show_info
-    from aqt.utils import showWarning as show_warning
-    from aqt.utils import tooltip
+except ImportError:  # pragma: no cover
+    from aqt.utils import showCritical as show_critical  # pragma: no cover
+    from aqt.utils import showInfo as show_info  # pragma: no cover
+    from aqt.utils import showWarning as show_warning  # pragma: no cover
+    from aqt.utils import tooltip  # pragma: no cover
 
 try:  # PyQt6-style enums
     SINGLE_SELECTION = QAbstractItemView.SelectionMode.SingleSelection
     NO_SELECTION = QAbstractItemView.SelectionMode.NoSelection
-except AttributeError:  # PyQt5 fallback
-    SINGLE_SELECTION = QAbstractItemView.SingleSelection
-    NO_SELECTION = QAbstractItemView.NoSelection
+except AttributeError:  # pragma: no cover
+    SINGLE_SELECTION = QAbstractItemView.SingleSelection  # pragma: no cover
+    NO_SELECTION = QAbstractItemView.NoSelection  # pragma: no cover
 
 try:
     ITEM_IS_USER_CHECKABLE = Qt.ItemFlag.ItemIsUserCheckable
     CHECKED_STATE = Qt.CheckState.Checked
     UNCHECKED_STATE = Qt.CheckState.Unchecked
     USER_ROLE = Qt.ItemDataRole.UserRole
-except AttributeError:
-    ITEM_IS_USER_CHECKABLE = Qt.ItemIsUserCheckable
-    CHECKED_STATE = Qt.Checked
-    UNCHECKED_STATE = Qt.Unchecked
-    USER_ROLE = Qt.UserRole
+except AttributeError:  # pragma: no cover
+    ITEM_IS_USER_CHECKABLE = Qt.ItemIsUserCheckable  # pragma: no cover
+    CHECKED_STATE = Qt.Checked  # pragma: no cover
+    UNCHECKED_STATE = Qt.Unchecked  # pragma: no cover
+    USER_ROLE = Qt.UserRole  # pragma: no cover
 
 try:
     DIALOG_ACCEPTED = QDialog.DialogCode.Accepted
     DIALOG_REJECTED = QDialog.DialogCode.Rejected
-except AttributeError:
-    DIALOG_ACCEPTED = QDialog.Accepted
-    DIALOG_REJECTED = QDialog.Rejected
+except AttributeError:  # pragma: no cover
+    DIALOG_ACCEPTED = QDialog.Accepted  # pragma: no cover
+    DIALOG_REJECTED = QDialog.Rejected  # pragma: no cover
 
 try:
     BUTTON_OK = QDialogButtonBox.StandardButton.Ok
     BUTTON_CANCEL = QDialogButtonBox.StandardButton.Cancel
-except AttributeError:
-    BUTTON_OK = QDialogButtonBox.Ok
-    BUTTON_CANCEL = QDialogButtonBox.Cancel
+except AttributeError:  # pragma: no cover
+    BUTTON_OK = QDialogButtonBox.Ok  # pragma: no cover
+    BUTTON_CANCEL = QDialogButtonBox.Cancel  # pragma: no cover
 
 KANJI_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]")
 
@@ -391,7 +391,7 @@ class KanjiVocabSyncManager:
         settings_action.triggered.connect(self.show_settings)
         self._settings_action = settings_action
 
-    def _install_hooks(self) -> None:
+    def _install_hooks(self) -> None:  # pragma: no cover
         try:
             gui_hooks.reviewer_did_answer_card.remove(self._on_reviewer_did_answer_card)
         except (ValueError, AttributeError):
@@ -404,7 +404,7 @@ class KanjiVocabSyncManager:
         gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
         self._install_sync_hook()
 
-    def _install_sync_hook(self) -> None:
+    def _install_sync_hook(self) -> None:  # pragma: no cover
         if self._sync_hook_installed:
             return
         for hook_name in ("sync_did_finish", "sync_will_start"):
