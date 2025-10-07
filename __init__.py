@@ -151,6 +151,7 @@ class KanjiVocabSyncManager:
         self._sync_hook_target: Optional[str] = None
         self._profile_config_error_logged = False
         self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
+        self._last_question_card_id: Optional[int] = None
         self._debug_path: Optional[str] = None
         self._debug_enabled = True
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
@@ -499,15 +500,43 @@ class KanjiVocabSyncManager:
             return
         card_id = getattr(card, "id", None)
         if card_id is None or not isinstance(card_id, int):
-            if len(self._pre_answer_card_state) == 1:
-                only_key = next(iter(self._pre_answer_card_state))
-                self._debug("realtime/fallback_card_id", original=card_id, fallback=only_key)
-                card_id = only_key
-            elif isinstance(card_id, (str, bytes)) and card_id.isdigit():
-                card_id = int(card_id)
-            elif hasattr(card, "card"):
-                candidate = getattr(card, "card", None)
-                card_id = getattr(candidate, "id", None)
+            if isinstance(card_id, (str, bytes)):
+                try:
+                    numeric_id = int(card_id)
+                except Exception:
+                    numeric_id = None
+                else:
+                    self._debug("realtime/fallback_card_id", original=card_id, fallback=numeric_id, source="string")
+                    card_id = numeric_id
+            if card_id is None or not isinstance(card_id, int):
+                if self._last_question_card_id is not None and self._last_question_card_id in self._pre_answer_card_state:
+                    self._debug(
+                        "realtime/fallback_card_id",
+                        original=card_id,
+                        fallback=self._last_question_card_id,
+                        source="last_question",
+                    )
+                    card_id = self._last_question_card_id
+                elif self._pre_answer_card_state:
+                    # Use the most recent stored key.
+                    fallback_id = next(reversed(self._pre_answer_card_state))
+                    self._debug(
+                        "realtime/fallback_card_id",
+                        original=card_id,
+                        fallback=fallback_id,
+                        source="stored_state",
+                    )
+                    card_id = fallback_id
+                elif hasattr(card, "card"):
+                    candidate = getattr(card, "card", None)
+                    fallback_id = getattr(candidate, "id", None)
+                    self._debug(
+                        "realtime/fallback_card_id",
+                        original=card_id,
+                        fallback=fallback_id,
+                        source="card_attr",
+                    )
+                    card_id = fallback_id
         if card_id is None or not isinstance(card_id, int):
             self._debug("realtime/skip", reason="missing_card_id")
             return
@@ -522,6 +551,7 @@ class KanjiVocabSyncManager:
             "queue": stored_queue,
             "note_id": stored_note_id,
         }
+        self._last_question_card_id = card_id
         self._debug(
             "realtime/question",
             card_id=card_id,
@@ -553,6 +583,63 @@ class KanjiVocabSyncManager:
         if collection is None:
             return
 
+        card_id_obj = getattr(card, "id", None)
+        card_id: Optional[int]
+        if isinstance(card_id_obj, int):
+            card_id = card_id_obj
+        elif isinstance(card_id_obj, (str, bytes)):
+            try:
+                card_id = int(card_id_obj)
+            except Exception:
+                card_id = None
+            else:
+                self._debug(
+                    "realtime/fallback_card_id",
+                    original=card_id_obj,
+                    fallback=card_id,
+                    source="string",
+                )
+        else:
+            card_id = None
+
+        if card_id is None or card_id not in self._pre_answer_card_state:
+            if self._last_question_card_id is not None and self._last_question_card_id in self._pre_answer_card_state:
+                self._debug(
+                    "realtime/fallback_card_id",
+                    original=card_id_obj,
+                    fallback=self._last_question_card_id,
+                    source="last_question",
+                )
+                card_id = self._last_question_card_id
+            elif self._pre_answer_card_state:
+                fallback_id = next(reversed(self._pre_answer_card_state))
+                self._debug(
+                    "realtime/fallback_card_id",
+                    original=card_id_obj,
+                    fallback=fallback_id,
+                    source="stored_state",
+                )
+                card_id = fallback_id
+            elif hasattr(card, "card"):
+                candidate = getattr(card, "card", None)
+                fallback_id = getattr(candidate, "id", None)
+                if isinstance(fallback_id, int):
+                    self._debug(
+                        "realtime/fallback_card_id",
+                        original=card_id_obj,
+                        fallback=fallback_id,
+                        source="card_attr",
+                    )
+                    card_id = fallback_id
+
+        if card_id is None or card_id not in self._pre_answer_card_state:
+            self._debug(
+                "realtime/skip",
+                reason="missing_card_id",
+                original=card_id_obj,
+            )
+            return
+
         cfg = self.load_config()
         if not cfg.realtime_review:
             self._debug("realtime/skip", reason="realtime_disabled")
@@ -565,6 +652,26 @@ class KanjiVocabSyncManager:
             self._debug("realtime/skip", reason="kanji_model_unavailable")
             return
 
+        prev_state = self._pre_answer_card_state.pop(card_id, None)
+        if self._last_question_card_id == card_id:
+            self._last_question_card_id = None
+        if prev_state is None:
+            self._debug("realtime/skip", reason="missing_pre_state", card_id=card_id)
+            return
+        prev_type = prev_state.get("type")
+        prev_queue = prev_state.get("queue")
+        note_id_hint = prev_state.get("note_id")
+        was_new = (prev_queue == 0) or (prev_queue is None and prev_type == 0)
+        if not was_new:
+            self._debug(
+                "realtime/skip",
+                reason="not_new",
+                prev_type=prev_type,
+                prev_queue=prev_queue,
+            )
+            return
+
+        note: Optional[Note]
         try:
             note = card.note()
         except Exception:  # noqa: BLE001
@@ -632,23 +739,6 @@ class KanjiVocabSyncManager:
 
         if not kanji_chars:
             self._debug("realtime/skip", reason="no_kanji_chars", card_id=card_id)
-            return
-
-        prev_state = self._pre_answer_card_state.pop(card_id, None)
-        if prev_state is None:
-            self._debug("realtime/skip", reason="missing_pre_state", card_id=card_id)
-            return
-        prev_type = prev_state.get("type")
-        prev_queue = prev_state.get("queue")
-        note_id_hint = prev_state.get("note_id")
-        was_new = (prev_queue == 0) or (prev_queue is None and prev_type == 0)
-        if not was_new:
-            self._debug(
-                "realtime/skip",
-                reason="not_new",
-                prev_type=prev_type,
-                prev_queue=prev_queue,
-            )
             return
 
         if not cfg.vocab_note_types:
