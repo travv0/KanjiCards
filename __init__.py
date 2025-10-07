@@ -535,6 +535,12 @@ class KanjiVocabSyncManager:
             return
         if self.mw.col is None:
             return
+        self._debug(
+            "realtime/did_answer",
+            card_id=getattr(card, "id", None),
+            queue=getattr(card, "queue", None),
+            type=getattr(card, "type", None),
+        )
         try:
             self._process_reviewed_card(card)
         except Exception as err:  # noqa: BLE001
