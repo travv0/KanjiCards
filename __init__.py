@@ -425,9 +425,20 @@ class KanjiVocabSyncManager:
     # ------------------------------------------------------------------
     def run_sync(self) -> None:
         self.mw.checkpoint("Kanji Vocab Sync")
-        self.mw.progress.start(label="Scanning reviewed vocabulary notes...", immediate=True)
+        progress_obj = getattr(self.mw, "progress", None)
+        self.mw.progress.start(label="Preparing Kanji Vocab Sync…", immediate=True)
+        progress_tracker: Optional[Dict[str, object]] = None
+        if progress_obj and hasattr(progress_obj, "update"):
+            progress_tracker = {"progress": progress_obj, "current": 0, "max": 5}
+            try:
+                progress_obj.update(label="Collecting configuration…", value=0, max=5)
+            except TypeError:
+                try:
+                    progress_obj.update(label="Collecting configuration…")
+                except TypeError:
+                    pass
         try:
-            stats = self._sync_internal()
+            stats = self._sync_internal(progress_tracker=progress_tracker)
         except Exception as err:  # noqa: BLE001
             self.mw.progress.finish()
             show_critical(f"Kanji Vocab Sync failed:\n{err}")
@@ -438,7 +449,29 @@ class KanjiVocabSyncManager:
             self.mw.reset()
             return stats
 
-    def _sync_internal(self) -> Dict[str, object]:
+    def _progress_step(self, tracker: Optional[Dict[str, object]], label: str) -> None:
+        if not tracker:
+            return
+        progress = tracker.get("progress")
+        update = getattr(progress, "update", None)
+        if not callable(update):
+            return
+        current = int(tracker.get("current", 0)) + 1
+        tracker["current"] = current
+        max_value = tracker.get("max")
+        kwargs: Dict[str, object] = {"label": label}
+        if isinstance(max_value, int):
+            kwargs["value"] = current
+            kwargs["max"] = max_value
+        try:
+            update(**kwargs)
+        except TypeError:
+            try:
+                update(label)
+            except TypeError:
+                pass
+
+    def _sync_internal(self, *, progress_tracker: Optional[Dict[str, object]] = None) -> Dict[str, object]:
         cfg = self.load_config()
         collection = self.mw.col
         if collection is None:
@@ -447,19 +480,23 @@ class KanjiVocabSyncManager:
         if not cfg.kanji_note_type.name:
             raise RuntimeError("Kanji note type is not configured yet")
 
+        self._progress_step(progress_tracker, "Resolving note types…")
         kanji_model, kanji_field_indexes, kanji_field_index = self._get_kanji_model_context(collection, cfg)
 
         vocab_models = self._resolve_vocab_models(collection, cfg)
         if not vocab_models:
             raise RuntimeError("No valid vocabulary note types configured")
 
+        self._progress_step(progress_tracker, "Loading dictionary data…")
         dictionary = self._load_dictionary(cfg.dictionary_file)
 
+        self._progress_step(progress_tracker, "Scanning vocabulary notes…")
         usage_info = self._collect_vocab_usage(collection, vocab_models, cfg)
         active_chars = set(usage_info.keys())
 
         existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
 
+        self._progress_step(progress_tracker, "Updating kanji cards…")
         stats = self._apply_kanji_updates(
             collection,
             active_chars,
@@ -484,6 +521,7 @@ class KanjiVocabSyncManager:
             )
 
         vocab_field_map = {model["id"]: field_indexes for model, field_indexes in vocab_models}
+        self._progress_step(progress_tracker, "Updating vocabulary suspension…")
         suspension_stats = self._update_vocab_suspension(
             collection,
             cfg,
@@ -802,7 +840,15 @@ class KanjiVocabSyncManager:
             trigger()
 
     def _stats_warrant_sync(self, stats: Dict[str, object]) -> bool:
-        for key in ("created", "existing_tagged", "unsuspended", "tag_removed", "resuspended"):
+        for key in (
+            "created",
+            "existing_tagged",
+            "unsuspended",
+            "tag_removed",
+            "resuspended",
+            "vocab_suspended",
+            "vocab_unsuspended",
+        ):
             try:
                 if int(stats.get(key, 0)) > 0:
                     return True
