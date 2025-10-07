@@ -124,6 +124,13 @@ def manager(kanjicards_module):
     manager.mw = types.SimpleNamespace()
     manager._debug_enabled = False
     manager._debug_path = None
+    manager._pre_answer_card_state = {}
+    manager._last_question_card_id = None
+    manager._kanji_model_cache = None
+    manager._existing_notes_cache = None
+    manager._dictionary_cache = None
+    manager._vocab_model_cache = None
+    manager._realtime_error_logged = False
     return manager
 
 
