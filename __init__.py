@@ -149,7 +149,7 @@ class KanjiVocabSyncManager:
         self._sync_hook_installed = False
         self._sync_hook_target: Optional[str] = None
         self._profile_config_error_logged = False
-        self._pre_answer_card_type: Dict[int, Optional[int]] = {}
+        self._pre_answer_card_state: Dict[int, Tuple[Optional[int], Optional[int]]] = {}
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -475,7 +475,10 @@ class KanjiVocabSyncManager:
         if card_id is None:
             return
         card_type = getattr(card, "type", None)
-        self._pre_answer_card_type[card_id] = card_type if isinstance(card_type, int) else None
+        stored_type = card_type if isinstance(card_type, int) else None
+        queue = getattr(card, "queue", None)
+        stored_queue = queue if isinstance(queue, int) else None
+        self._pre_answer_card_state[card_id] = (stored_type, stored_queue)
 
     def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
@@ -525,10 +528,14 @@ class KanjiVocabSyncManager:
             return
 
         card_id = getattr(card, "id", None)
-        prev_type = None
+        prev_type: Optional[int] = None
+        prev_queue: Optional[int] = None
         if card_id is not None:
-            prev_type = self._pre_answer_card_type.pop(card_id, None)
-        if prev_type != 0:
+            prev_state = self._pre_answer_card_state.pop(card_id, None)
+            if prev_state is not None:
+                prev_type, prev_queue = prev_state
+        was_new = (prev_queue == 0) or (prev_queue is None and prev_type == 0)
+        if not was_new:
             return
 
         if not cfg.vocab_note_types:
@@ -550,6 +557,7 @@ class KanjiVocabSyncManager:
             vocab_field_map,
             existing_notes,
             target_chars=kanji_chars,
+            force_chars_reviewed=kanji_chars,
         )
 
         self._realtime_error_logged = False
@@ -1568,6 +1576,7 @@ class KanjiVocabSyncManager:
         vocab_field_map: Dict[int, List[int]],
         existing_notes: Dict[str, int],
         target_chars: Optional[Set[str]] = None,
+        force_chars_reviewed: Optional[Set[str]] = None,
     ) -> Dict[str, int]:
         stats = {"vocab_suspended": 0, "vocab_unsuspended": 0}
         tag = cfg.auto_suspend_tag.strip()
@@ -1578,6 +1587,10 @@ class KanjiVocabSyncManager:
             return stats
         tag_lower = tag.lower()
         kanji_reviewed = self._compute_kanji_reviewed_flags(collection, existing_notes)
+        if force_chars_reviewed:
+            for char in force_chars_reviewed:
+                if char:
+                    kanji_reviewed[char] = True
         card_map = self._load_card_status_for_notes(collection, notes_info.keys())
 
         for note_id, (chars, tag_set) in notes_info.items():
