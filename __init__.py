@@ -529,7 +529,7 @@ class KanjiVocabSyncManager:
         )
 
         if cfg.reorder_mode in {"frequency", "vocab"}:
-            self._reorder_new_kanji_cards(
+            reorder_stats = self._reorder_new_kanji_cards(
                 collection,
                 kanji_model,
                 kanji_field_index,
@@ -537,6 +537,11 @@ class KanjiVocabSyncManager:
                 usage_info,
                 dictionary,
             )
+            for key, value in reorder_stats.items():
+                try:
+                    stats[key] = stats.get(key, 0) + int(value)
+                except Exception:
+                    continue
 
         vocab_field_map = {model["id"]: field_indexes for model, field_indexes in vocab_models}
         self._progress_step(progress_tracker, "Updating vocabulary suspension…")
@@ -866,6 +871,8 @@ class KanjiVocabSyncManager:
             "resuspended",
             "vocab_suspended",
             "vocab_unsuspended",
+            "cards_reordered",
+            "bucket_tags_updated",
         ):
             try:
                 if int(stats.get(key, 0)) > 0:
@@ -1328,12 +1335,12 @@ class KanjiVocabSyncManager:
         bucket_id: Optional[int],
         bucket_tag_map: Dict[int, str],
         active_bucket_tags: Set[str],
-    ) -> None:
+    ) -> bool:
         target_tag = bucket_tag_map.get(bucket_id, "") if bucket_id is not None else ""
         target_lower = target_tag.lower() if target_tag else ""
 
         if not target_tag and not active_bucket_tags:
-            return
+            return False
 
         note = _get_note(collection, note_id)
         changed = False
@@ -1354,6 +1361,7 @@ class KanjiVocabSyncManager:
 
         if changed:
             note.flush()
+        return changed
 
     def _find_notes_with_bucket_tags(
         self,
@@ -1432,6 +1440,8 @@ class KanjiVocabSyncManager:
         unsuspend_tag: str,
         active_chars: Set[str],
         cfg: AddonConfig,
+        frequency_field_name: Optional[str] = None,
+        dictionary: Optional[Dict[str, Dict[str, object]]] = None,
     ) -> Tuple[int, int]:
         removed = 0
         resuspended_total = 0
@@ -1444,6 +1454,11 @@ class KanjiVocabSyncManager:
                 continue
             note = _get_note(collection, note_id)
             changed = False
+            if frequency_field_name and dictionary:
+                entry = dictionary.get(kanji_char)
+                if isinstance(entry, dict):
+                    if self._update_frequency_field(note, frequency_field_name, entry.get("frequency")):
+                        changed = True
             tag_lookup = {existing.lower(): existing for existing in note.tags if isinstance(existing, str)}
             if tag in note.tags:
                 _remove_tag(note, tag)
@@ -1478,10 +1493,10 @@ class KanjiVocabSyncManager:
         cfg: AddonConfig,
         usage_info: Dict[str, KanjiUsageInfo],
         dictionary: Dict[str, Dict[str, object]],
-    ) -> None:
+    ) -> Dict[str, int]:
         mode = cfg.reorder_mode
         if mode not in {"frequency", "vocab"}:
-            return
+            return {"cards_reordered": 0, "bucket_tags_updated": 0}
 
         rows = _db_all(
             collection,
@@ -1495,7 +1510,7 @@ class KanjiVocabSyncManager:
             context="reorder_new_kanji_cards/load",
         )
         if not rows:
-            return
+            return {"cards_reordered": 0, "bucket_tags_updated": 0}
 
         bucket_tag_map = {
             0: cfg.bucket_tags.get("reviewed_vocab", "").strip(),
@@ -1530,15 +1545,20 @@ class KanjiVocabSyncManager:
             entries.append((key, card_id, due_value, original_mod, original_usn, note_id, bucket_id))
 
         if not entries:
-            return
+            return {"cards_reordered": 0, "bucket_tags_updated": 0}
 
         now = intTime()
         usn = collection.usn()
         entries.sort(key=lambda item: item[0])
         processed_notes: Set[int] = set()
+        reordered_cards = 0
+        bucket_updates = 0
         for new_due, (key, card_id, original_due, original_mod, original_usn, note_id, bucket_id) in enumerate(entries):
-            new_mod = now if new_due != original_due else original_mod
-            new_usn = usn if new_due != original_due else original_usn
+            due_changed = new_due != original_due
+            if due_changed:
+                reordered_cards += 1
+            new_mod = now if due_changed else original_mod
+            new_usn = usn if due_changed else original_usn
             _db_execute(
                 collection,
                 "UPDATE cards SET due = ?, mod = ?, usn = ? WHERE id = ?",
@@ -1549,13 +1569,14 @@ class KanjiVocabSyncManager:
                 context="reorder_new_kanji_cards/update",
             )
             if apply_bucket_tags and note_id not in processed_notes:
-                self._apply_bucket_tag_to_note(
+                if self._apply_bucket_tag_to_note(
                     collection,
                     note_id,
                     bucket_id,
                     bucket_tag_map,
                     active_bucket_tags,
-                )
+                ):
+                    bucket_updates += 1
                 processed_notes.add(note_id)
 
         if apply_bucket_tags:
@@ -1563,13 +1584,19 @@ class KanjiVocabSyncManager:
             for note_id in tagged_notes:
                 if note_id in processed_notes:
                     continue
-                self._apply_bucket_tag_to_note(
+                if self._apply_bucket_tag_to_note(
                     collection,
                     note_id,
                     None,
                     bucket_tag_map,
                     active_bucket_tags,
-                )
+                ):
+                    bucket_updates += 1
+
+        return {
+            "cards_reordered": reordered_cards,
+            "bucket_tags_updated": bucket_updates,
+        }
 
     def _build_reorder_key(
         self,
@@ -1736,6 +1763,8 @@ class KanjiVocabSyncManager:
                 unsuspend_tag,
                 unique_chars,
                 cfg,
+                frequency_field_name=frequency_field_name,
+                dictionary=dictionary,
             )
             stats["tag_removed"] = removed
             stats["resuspended"] = resuspended
