@@ -150,7 +150,7 @@ class KanjiVocabSyncManager:
         self._sync_hook_installed = False
         self._sync_hook_target: Optional[str] = None
         self._profile_config_error_logged = False
-        self._pre_answer_card_state: Dict[int, Tuple[Optional[int], Optional[int]]] = {}
+        self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
         self._debug_path: Optional[str] = None
         self._debug_enabled = True
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
@@ -498,18 +498,36 @@ class KanjiVocabSyncManager:
         if not card:
             return
         card_id = getattr(card, "id", None)
-        if card_id is None:
+        if card_id is None or not isinstance(card_id, int):
+            if len(self._pre_answer_card_state) == 1:
+                only_key = next(iter(self._pre_answer_card_state))
+                self._debug("realtime/fallback_card_id", original=card_id, fallback=only_key)
+                card_id = only_key
+            elif isinstance(card_id, (str, bytes)) and card_id.isdigit():
+                card_id = int(card_id)
+            elif hasattr(card, "card"):
+                candidate = getattr(card, "card", None)
+                card_id = getattr(candidate, "id", None)
+        if card_id is None or not isinstance(card_id, int):
+            self._debug("realtime/skip", reason="missing_card_id")
             return
         card_type = getattr(card, "type", None)
         stored_type = card_type if isinstance(card_type, int) else None
         queue = getattr(card, "queue", None)
         stored_queue = queue if isinstance(queue, int) else None
-        self._pre_answer_card_state[card_id] = (stored_type, stored_queue)
+        note_id = getattr(card, "nid", None)
+        stored_note_id = note_id if isinstance(note_id, int) else None
+        self._pre_answer_card_state[card_id] = {
+            "type": stored_type,
+            "queue": stored_queue,
+            "note_id": stored_note_id,
+        }
         self._debug(
             "realtime/question",
             card_id=card_id,
             card_type=stored_type,
             queue=stored_queue,
+            note_id=stored_note_id,
         )
 
     def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
@@ -544,14 +562,27 @@ class KanjiVocabSyncManager:
         try:
             note = card.note()
         except Exception:  # noqa: BLE001
-            card_id = getattr(card, "id", None)
+            note = None
             self._debug(
                 "realtime/skip",
                 reason="note_lookup_failed_fetch",
                 card_id=card_id,
+                note_id_hint=note_id_hint,
             )
-            fetched_card = None
-            if card_id is not None:
+            if note_id_hint:
+                try:
+                    note = self.mw.col.get_note(note_id_hint)
+                except Exception as err:  # noqa: BLE001
+                    self._debug(
+                        "realtime/skip",
+                        reason="note_lookup_failed_hint",
+                        card_id=card_id,
+                        note_id=note_id_hint,
+                        error=str(err),
+                    )
+                    note = None
+            if note is None:
+                fetched_card = None
                 try:
                     fetched_card = self.mw.col.get_card(card_id)
                 except Exception as err:  # noqa: BLE001
@@ -561,17 +592,18 @@ class KanjiVocabSyncManager:
                         card_id=card_id,
                         error=str(err),
                     )
-            if fetched_card is None:
-                return
-            try:
-                note = fetched_card.note()
-            except Exception as err:  # noqa: BLE001
-                self._debug(
-                    "realtime/skip",
-                    reason="note_lookup_failed",
-                    card_id=card_id,
-                    error=str(err),
-                )
+                if fetched_card is not None:
+                    try:
+                        note = fetched_card.note()
+                    except Exception as err:  # noqa: BLE001
+                        self._debug(
+                            "realtime/skip",
+                            reason="note_lookup_failed",
+                            card_id=card_id,
+                            error=str(err),
+                        )
+                        note = None
+            if note is None:
                 return
 
         if note.mid != kanji_model.get("id"):
@@ -596,13 +628,13 @@ class KanjiVocabSyncManager:
             self._debug("realtime/skip", reason="no_kanji_chars", card_id=card_id)
             return
 
-        card_id = getattr(card, "id", None)
-        prev_type: Optional[int] = None
-        prev_queue: Optional[int] = None
-        if card_id is not None:
-            prev_state = self._pre_answer_card_state.pop(card_id, None)
-            if prev_state is not None:
-                prev_type, prev_queue = prev_state
+        prev_state = self._pre_answer_card_state.pop(card_id, None)
+        if prev_state is None:
+            self._debug("realtime/skip", reason="missing_pre_state", card_id=card_id)
+            return
+        prev_type = prev_state.get("type")
+        prev_queue = prev_state.get("queue")
+        note_id_hint = prev_state.get("note_id")
         was_new = (prev_queue == 0) or (prev_queue is None and prev_type == 0)
         if not was_new:
             self._debug(
@@ -623,10 +655,11 @@ class KanjiVocabSyncManager:
             return
 
         vocab_field_map = {model["id"]: indexes for model, indexes in vocab_map.values()}
+        note_id_value = getattr(note, "id", note_id_hint)
         self._debug(
             "realtime/process",
             card_id=card_id,
-            note_id=getattr(note, "id", None),
+            note_id=note_id_value,
             chars="".join(sorted(kanji_chars)),
             prev_type=prev_type,
             prev_queue=prev_queue,
