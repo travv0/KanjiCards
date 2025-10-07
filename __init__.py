@@ -149,6 +149,7 @@ class KanjiVocabSyncManager:
         self._sync_hook_installed = False
         self._sync_hook_target: Optional[str] = None
         self._profile_config_error_logged = False
+        self._pre_answer_card_type: Dict[int, Optional[int]] = {}
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -364,6 +365,11 @@ class KanjiVocabSyncManager:
             gui_hooks.reviewer_did_answer_card.remove(self._on_reviewer_did_answer_card)
         except (ValueError, AttributeError):
             pass
+        try:
+            gui_hooks.reviewer_will_answer_card.remove(self._on_reviewer_will_answer_card)
+        except (ValueError, AttributeError):
+            pass
+        gui_hooks.reviewer_will_answer_card.append(self._on_reviewer_will_answer_card)
         gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
         self._install_sync_hook()
 
@@ -462,6 +468,15 @@ class KanjiVocabSyncManager:
 
         return stats
 
+    def _on_reviewer_will_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
+        if not card:
+            return
+        card_id = getattr(card, "id", None)
+        if card_id is None:
+            return
+        card_type = getattr(card, "type", None)
+        self._pre_answer_card_type[card_id] = card_type if isinstance(card_type, int) else None
+
     def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
             return
@@ -480,19 +495,13 @@ class KanjiVocabSyncManager:
             return
 
         cfg = self.load_config()
-        if not cfg.vocab_note_types:
-            return
         if not cfg.realtime_review:
             return
 
         try:
-            kanji_model, kanji_field_indexes, kanji_field_index = self._get_kanji_model_context(collection, cfg)
+            kanji_model, _, kanji_field_index = self._get_kanji_model_context(collection, cfg)
         except RuntimeError:
             # Configuration incomplete; wait until user configures properly.
-            return
-
-        vocab_map = self._get_vocab_model_map(collection, cfg)
-        if not vocab_map:
             return
 
         try:
@@ -500,11 +509,7 @@ class KanjiVocabSyncManager:
         except Exception:  # noqa: BLE001
             return
 
-        model_info = vocab_map.get(note.mid)
-        if not model_info:
-            return
-        _, field_indexes = model_info
-        if not field_indexes:
+        if note.mid != kanji_model.get("id"):
             return
 
         try:
@@ -513,48 +518,33 @@ class KanjiVocabSyncManager:
             fields = note.split_fields() if hasattr(note, "split_fields") else []
 
         kanji_chars: Set[str] = set()
-        for field_index in field_indexes:
-            if field_index < len(fields):
-                kanji_chars.update(KANJI_PATTERN.findall(fields[field_index]))
+        if kanji_field_index < len(fields):
+            kanji_chars.update(KANJI_PATTERN.findall(fields[kanji_field_index]))
 
         if not kanji_chars:
             return
 
-        try:
-            dictionary = self._load_dictionary(cfg.dictionary_file)
-        except Exception as err:  # noqa: BLE001
-            if not self._realtime_error_logged:
-                print(f"[KanjiCards] dictionary load failed during review: {err}")
-                self._realtime_error_logged = True
+        card_id = getattr(card, "id", None)
+        prev_type = None
+        if card_id is not None:
+            prev_type = self._pre_answer_card_type.pop(card_id, None)
+        if prev_type != 0:
             return
 
-        existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
+        if not cfg.vocab_note_types:
+            return
 
-        usage_info = self._collect_vocab_usage(collection, list(vocab_map.values()), cfg)
+        vocab_map = self._get_vocab_model_map(collection, cfg)
+        if not vocab_map:
+            return
 
-        self._apply_kanji_updates(
-            collection,
-            kanji_chars,
-            dictionary,
-            kanji_model,
-            kanji_field_indexes,
-            kanji_field_index,
-            cfg,
-            usage_info,
-            existing_notes,
-        )
+        vocab_field_map = {model["id"]: indexes for model, indexes in vocab_map.values()}
 
-        if cfg.reorder_mode in {"frequency", "vocab"}:
-            self._reorder_new_kanji_cards(
-                collection,
-                kanji_model,
-                kanji_field_index,
-                cfg,
-                usage_info,
-                dictionary,
-            )
+        existing_notes = {char: getattr(note, "id", None) for char in kanji_chars}
+        existing_notes = {char: note_id for char, note_id in existing_notes.items() if isinstance(note_id, int)}
+        if not existing_notes:
+            return
 
-        vocab_field_map = {model["id"]: fields for model, fields in vocab_map.values()}
         self._update_vocab_suspension(
             collection,
             cfg,
