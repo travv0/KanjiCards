@@ -14,7 +14,7 @@ import time
 from collections import defaultdict
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from anki.collection import Collection
 from anki.models import NotetypeDict
@@ -86,6 +86,7 @@ except AttributeError:
 
 KANJI_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]")
 
+SQLITE_MAX_VARIABLES = 900
 
 BUCKET_TAG_KEYS: Tuple[str, str, str] = (
     "reviewed_vocab",
@@ -1434,21 +1435,30 @@ class KanjiVocabSyncManager:
     ) -> Tuple[int, int]:
         removed = 0
         resuspended_total = 0
+        created_tag = cfg.created_tag.strip()
+        created_tag_lower = created_tag.lower() if created_tag else ""
+        unsuspend_clean = (unsuspend_tag or "").strip()
+        unsuspend_lower = unsuspend_clean.lower() if unsuspend_clean else ""
         for kanji_char, note_id in existing_notes.items():
             if kanji_char in active_chars:
                 continue
             note = _get_note(collection, note_id)
             changed = False
+            tag_lookup = {existing.lower(): existing for existing in note.tags if isinstance(existing, str)}
             if tag in note.tags:
                 _remove_tag(note, tag)
                 changed = True
                 removed += 1
-            resuspended = 0
-            if unsuspend_tag and unsuspend_tag in note.tags:
-                _remove_tag(note, unsuspend_tag)
+            resuspend_needed = False
+            if unsuspend_lower and unsuspend_lower in tag_lookup:
+                _remove_tag(note, tag_lookup[unsuspend_lower])
+                changed = True
+                resuspend_needed = True
+            if created_tag_lower and created_tag_lower in tag_lookup:
+                resuspend_needed = True
+            if resuspend_needed:
                 resuspended = _resuspend_note_cards(collection, note)
                 if resuspended:
-                    changed = True
                     resuspended_total += resuspended
             self._update_kanji_status_tags(
                 note,
@@ -1742,13 +1752,17 @@ class KanjiVocabSyncManager:
         note_ids = list(dict.fromkeys(existing_notes.values()))
         if not note_ids:
             return {}
-        placeholders = ",".join("?" for _ in note_ids)
-        rows = _db_all(
-            collection,
-            f"SELECT nid, MAX(CASE WHEN type != 0 THEN 1 ELSE 0 END) FROM cards WHERE nid IN ({placeholders}) GROUP BY nid",
-            *note_ids,
-            context="compute_kanji_reviewed_flags",
-        )
+        rows: List[Tuple[int, int]] = []
+        for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
+            placeholders = ",".join("?" for _ in batch_ids)
+            rows.extend(
+                _db_all(
+                    collection,
+                    f"SELECT nid, MAX(CASE WHEN type != 0 THEN 1 ELSE 0 END) FROM cards WHERE nid IN ({placeholders}) GROUP BY nid",
+                    *batch_ids,
+                    context=f"compute_kanji_reviewed_flags/batch{batch_index}",
+                )
+            )
         status_by_note: Dict[int, bool] = {nid: bool(flag) for nid, flag in rows}
         return {char: status_by_note.get(note_id, False) for char, note_id in existing_notes.items()}
 
@@ -1814,13 +1828,17 @@ class KanjiVocabSyncManager:
         unique_ids = list(dict.fromkeys(note_ids))
         if not unique_ids:
             return {}
-        placeholders = ",".join("?" for _ in unique_ids)
-        rows = _db_all(
-            collection,
-            f"SELECT id, nid, queue FROM cards WHERE nid IN ({placeholders})",
-            *unique_ids,
-            context="load_card_status_for_notes",
-        )
+        rows: List[Tuple[int, int, int]] = []
+        for batch_index, batch_ids in enumerate(_chunk_sequence(unique_ids, SQLITE_MAX_VARIABLES)):
+            placeholders = ",".join("?" for _ in batch_ids)
+            rows.extend(
+                _db_all(
+                    collection,
+                    f"SELECT id, nid, queue FROM cards WHERE nid IN ({placeholders})",
+                    *batch_ids,
+                    context=f"load_card_status_for_notes/batch{batch_index}",
+                )
+            )
         card_map: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
         for card_id, nid, queue in rows:
             card_map[nid].append((card_id, queue))
@@ -1834,17 +1852,21 @@ class KanjiVocabSyncManager:
         unique_ids = list(dict.fromkeys(note_ids))
         if not unique_ids:
             return {}
-        placeholders = ",".join("?" for _ in unique_ids)
-        sql = (
-            "SELECT nid, MAX(CASE WHEN queue != -1 THEN 1 ELSE 0 END) "
-            "FROM cards WHERE nid IN (%s) GROUP BY nid" % placeholders
-        )
-        rows = _db_all(
-            collection,
-            sql,
-            *unique_ids,
-            context="load_note_active_status",
-        )
+        rows: List[Tuple[int, int]] = []
+        for batch_index, batch_ids in enumerate(_chunk_sequence(unique_ids, SQLITE_MAX_VARIABLES)):
+            placeholders = ",".join("?" for _ in batch_ids)
+            sql = (
+                "SELECT nid, MAX(CASE WHEN queue != -1 THEN 1 ELSE 0 END) "
+                f"FROM cards WHERE nid IN ({placeholders}) GROUP BY nid"
+            )
+            rows.extend(
+                _db_all(
+                    collection,
+                    sql,
+                    *batch_ids,
+                    context=f"load_note_active_status/batch{batch_index}",
+                )
+            )
         return {nid: bool(flag) for nid, flag in rows}
 
     def _update_vocab_suspension(
@@ -2708,12 +2730,14 @@ def _log_db_error(
     print(f"  SQL: {sql}")
     if params:
         print(f"  Params: {params}")
-        print(
-            "  Param types: "
-            + tuple(type(param).__name__ for param in params).__str__()
-        )
-    else:
-        print("  Params: ()")
+
+
+def _chunk_sequence(values: Sequence[int], chunk_size: int) -> Iterator[List[int]]:
+    """Yield slices limited by SQLite parameter cap."""
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    for start in range(0, len(values), chunk_size):
+        yield list(values[start : start + chunk_size])
 
 
 def _new_note(collection: Collection, model: NotetypeDict) -> Note:
