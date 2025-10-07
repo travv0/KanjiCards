@@ -544,17 +544,32 @@ class KanjiVocabSyncManager:
         try:
             note = card.note()
         except Exception:  # noqa: BLE001
-            self._debug("realtime/skip", reason="note_lookup_failed_fetch")
+            card_id = getattr(card, "id", None)
+            self._debug(
+                "realtime/skip",
+                reason="note_lookup_failed_fetch",
+                card_id=card_id,
+            )
+            fetched_card = None
+            if card_id is not None:
+                try:
+                    fetched_card = self.mw.col.get_card(card_id)
+                except Exception as err:  # noqa: BLE001
+                    self._debug(
+                        "realtime/skip",
+                        reason="card_lookup_failed",
+                        card_id=card_id,
+                        error=str(err),
+                    )
+            if fetched_card is None:
+                return
             try:
-                note_id = getattr(card, "nid", None)
-                if note_id is None:
-                    raise ValueError("card.missing_note_id")
-                note = self.mw.col.get_note(note_id)
+                note = fetched_card.note()
             except Exception as err:  # noqa: BLE001
                 self._debug(
                     "realtime/skip",
                     reason="note_lookup_failed",
-                    card_id=getattr(card, "id", None),
+                    card_id=card_id,
                     error=str(err),
                 )
                 return
