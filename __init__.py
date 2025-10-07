@@ -1,4 +1,4 @@
-"""Kanji Vocab Sync Add-on.
+"""KanjiCards add-on.
 
 This add-on inspects configured vocabulary notes that the user has reviewed
 and ensures each kanji found in those notes has a corresponding kanji card.
@@ -136,11 +136,11 @@ class KanjiUsageInfo:
 
 
 class KanjiVocabSyncManager:
-    """Core coordinator for the Kanji Vocab Sync add-on."""
+    """Core coordinator for the KanjiCards add-on."""
 
     def __init__(self) -> None:
         if not mw:
-            raise RuntimeError("Kanji Vocab Sync requires Anki main window")
+            raise RuntimeError("KanjiCards requires Anki main window")
         self.mw = mw
         self._dictionary_cache: Optional[Dict[str, Any]] = None
         self._existing_notes_cache: Optional[Dict[str, Any]] = None
@@ -384,7 +384,7 @@ class KanjiVocabSyncManager:
         sync_action.triggered.connect(self.run_sync)
         self._sync_action = sync_action
 
-        settings_action = menu.addAction("Kanji Vocab Sync Settings")
+        settings_action = menu.addAction("KanjiCards Settings")
         settings_action.triggered.connect(self.show_settings)
         self._settings_action = settings_action
 
@@ -425,9 +425,9 @@ class KanjiVocabSyncManager:
     # Sync routine
     # ------------------------------------------------------------------
     def run_sync(self) -> None:
-        self.mw.checkpoint("Kanji Vocab Sync")
+        self.mw.checkpoint("KanjiCards")
         progress_obj = getattr(self.mw, "progress", None)
-        self.mw.progress.start(label="Preparing Kanji Vocab Sync…", immediate=True)
+        self.mw.progress.start(label="Preparing KanjiCards…", immediate=True)
         progress_tracker: Optional[Dict[str, object]] = None
         if progress_obj and hasattr(progress_obj, "update"):
             progress_tracker = {"progress": progress_obj, "current": 0, "max": 5}
@@ -442,7 +442,7 @@ class KanjiVocabSyncManager:
             stats = self._sync_internal(progress_tracker=progress_tracker)
         except Exception as err:  # noqa: BLE001
             self.mw.progress.finish()
-            show_critical(f"Kanji Vocab Sync failed:\n{err}")
+            show_critical(f"KanjiCards sync failed:\n{err}")
             return None
         else:
             self.mw.progress.finish()
@@ -2178,7 +2178,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
 
     def __init__(self, manager: KanjiVocabSyncManager, config: AddonConfig) -> None:
         super().__init__(manager.mw)
-        self.setWindowTitle("Kanji Vocab Sync Settings")
+        self.setWindowTitle("KanjiCards Settings")
         self.manager = manager
         self.config = config
 

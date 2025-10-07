@@ -1,69 +1,42 @@
 # KanjiCards
 
-KanjiCards is an Anki add-on that keeps a configured kanji note type in sync with the kanji that appear in your reviewed vocabulary notes. It helps surface which characters already have dedicated study cards, automatically fills in missing kanji notes from a dictionary, and unsuspends kanji cards that should be active for newly encountered vocabulary.
+KanjiCards keeps a kanji note type aligned with the characters that appear in the vocabulary notes you actually study. It makes sure every kanji has a card, fills those cards with dictionary data, and keeps their suspension/tag status in step with your reviews.
 
-## Key Features
-- Scans only **reviewed** vocabulary cards (cards with revlog entries) from the note types you configure.
-- Finds all kanji characters in the selected vocab fields and ensures matching kanji notes exist.
-- Tags existing kanji notes with a configurable tag; newly created kanji notes receive both the “existing” tag and an additional “auto-created” tag.
-- Removes that existing tag automatically if no reviewed vocab cards still contain the kanji.
-- Unsuspends kanji cards when necessary, tagging them with a configurable marker so you can see they were revived by KanjiCards.
-- Automatically populates kanji notes with character, meaning, stroke count, kunyomi, and onyomi data taken from a configured dictionary (KANJIDIC2 XML or a JSON mapping).
-- Unsuspends kanji cards (unless they carry the leech tag) so they return to study if you already have a note for that character.
-- While you review configured vocab cards, the add-on can perform the same tagging/creation/unsuspension automatically in real time (enabled by default).
-- Optionally auto-runs after Anki sync to pick up reviews completed on other devices.
-- Can reorder newly created kanji cards so high-utility characters appear earlier, either by dictionary frequency or by the order you will encounter them in new vocab notes.
-- Offers a GUI settings dialog from Anki’s **Tools** menu for configuring vocab note types, the kanji note type/field mapping, tags, and dictionary file.
+## What It Does
+- Scans the fields you mark on each vocab note type, collects every kanji it finds, and tracks whether those cards have review history (optionally skipping suspended vocab cards).
+- Creates missing kanji notes and populates kanji, meanings, stroke counts, readings, and optional frequency data from a KANJIDIC2 XML file or a JSON mapping.
+- Tags matching kanji notes so you can see which ones already connect to vocab (`existing_tag`), which ones the add-on created (`created_tag`), and which ones it unsuspended (`unsuspended_tag`).
+- Keeps kanji status tags up to date: optional markers for kanji that only appear in new vocab (`only_new_vocab_tag`) or no longer appear anywhere (`no_vocab_tag`), plus bucket tags for reviewed / unreviewed / no-vocab kanji if you configure them.
+- Unsuspends kanji cards that should come back for study and resuspends them (removing tags) if no configured vocab uses the character anymore.
+- Optionally auto-suspends vocab cards whose kanji are still unseen and unsuspends them once the matching kanji have been reviewed.
+- Reorders new kanji cards so they appear either by KANJIDIC frequency or by the order you will encounter them in vocabulary.
 
-## Installation
-1. Copy the contents of this repository into Anki’s `addons21` directory under a folder named `kanjicards` (or install via AnkiWeb once published).
-2. Restart Anki so it loads the add-on.
+## Getting Started
+1. Copy this folder into Anki’s `addons21` directory under `kanjicards` (or install it from AnkiWeb when available).
+2. Place your dictionary file (default: `kanjidic2.xml`) inside the add-on folder or provide an absolute path.
+3. Restart Anki so the add-on loads.
 
-## Configuration
-1. In Anki, open **Tools → Kanji Vocab Sync Settings**.
-2. **General tab**
-   - Set the tag to apply to existing kanji notes (default: `has_vocab_kanji`).
-   - Set the tag added to auto-created kanji notes (default: `auto_kanji_card`).
-   - Choose the dictionary file. You can supply either:
-     - A JSON file mapping kanji to the fields `definition`, `stroke_count`, `kunyomi`, and `onyomi`, or
-     - A full KANJIDIC2 XML file (recommended). The add-on parses the XML and extracts the first stroke count, all Japanese on/kun readings, and English meanings.
-   - Optionally pick a specific deck for newly created kanji notes. Leave blank to fall back to the kanji note type’s default deck or your current deck.
-   - Set the tag to apply to kanji notes that the add-on unsuspends (default: `kanjicards_unsuspended`). If the note later loses its vocab tag, this marker is removed and the card is resuspended automatically.
-   - Choose how to **Order new kanji cards**: by frequency (KANJIDIC2 rankings) or by vocabulary order (mirroring the order you will see the vocab cards). Frequency sorting places items without frequency data afterward using vocab order; vocabulary sorting puts kanji tied to already-reviewed vocab first (by frequency) and the rest by vocab order.
-   - Toggle **Update during reviews** if you want KanjiCards to react instantly while you answer vocab cards.
-   - Enable **Run automatically after sync** if you want KanjiCards to rerun once Anki finishes syncing.
-3. **Kanji note tab**
-   - Select the kanji note type and assign which fields store each piece of data (kanji, definition, stroke count, kunyomi, onyomi).
-4. **Vocab notes tab**
-   - Add one or more vocabulary note types and select the fields that should be scanned for kanji characters.
-5. Click **OK** to save your settings.
+## Configure It
+Open **Tools → KanjiCards Settings**.
+- **General tab**: pick the tags you want to use, choose the dictionary file, select the destination deck for new kanji notes (or keep the default), decide whether to update during reviews, run automatically after sync, ignore suspended vocab, auto-suspend vocab that still contains unreviewed kanji, and pick a reorder mode or bucket tags if you use them.
+- **Kanji note tab**: choose the kanji note type and map which fields hold the literal, meaning, stroke count, readings, and optional frequency.
+- **Vocab notes tab**: add each vocabulary note type you care about and choose the text fields that should be scanned for kanji.
+Save to persist both the global config and your per-profile overrides.
 
-## Usage
-- Choose **Tools → Sync Kanji Cards with Vocab** whenever you want to sync.
-- The add-on reports how many kanji it scanned, how many existing notes were tagged, how many cards were unsuspended, how many new kanji notes were created, and whether any kanji were missing in the dictionary source.
-- Newly created kanji notes are added to the deck associated with the kanji note type (or Anki’s current/default deck if none is set).
+## Running a Sync
+- Use **Tools → Sync Kanji Cards with Vocab** to run the process on demand.
+- The add-on reports how many kanji it scanned, how many notes were created or tagged, how many cards were suspended/unsuspended, and any characters missing from the dictionary.
+- Newly created kanji notes go to the deck you selected (or the note type’s default deck if left blank).
+- With **Update during reviews** enabled, KanjiCards updates kanji tags and vocab suspension right after you study a new kanji card, so freshly reviewed characters take effect without a manual sync.
+- With **Run automatically after sync** enabled, Anki triggers a sync pass once the collection finishes syncing; if changes were made, KanjiCards asks Anki to sync again so the updates propagate.
 
 ## Dictionary Data and Licensing
-If you bundle the official KANJIDIC2 file with this add-on or your deck, you must comply with the Electronic Dictionary Research & Development Group’s licensing terms:
+KANJIDIC2 data (including SKIP codes) is released under the Creative Commons Attribution-ShareAlike 4.0 International License (CC BY-SA 4.0). If you redistribute the file with this add-on or a deck, you must provide attribution, link to the license, and share any modifications under the same license.
 
-- **KANJIDIC2 data** (including SKIP codes) is released under the Creative Commons Attribution–ShareAlike 4.0 International License (CC BY-SA 4.0).
-- You must give appropriate credit, provide a link to the license, and indicate if changes were made.
-- If you redistribute a modified version of the dictionary data, it must remain under CC BY-SA 4.0.
+Suggested attribution:
+> This add-on bundles data from the KANJIDIC2 project. © Electronic Dictionary Research & Development Group, used under CC BY-SA 4.0.
 
-Recommended attribution text:
->
-> This add-on bundles data from the KANJIDIC2 project. © Electronic Dictionary Research & Development Group, used under CC BY-SA 4.0. No changes were made (unless you modify it—then describe the modifications).
+See the [EDRDG license page](https://www.edrdg.org/edrdg/licence.html) and the [Creative Commons CC BY-SA 4.0 summary](https://creativecommons.org/licenses/by-sa/4.0/) for details. If you ship an alternative JSON dictionary, document its source and licensing as needed.
 
-See the [EDRDG license page](https://www.edrdg.org/edrdg/licence.html) and the [Creative Commons CC BY-SA 4.0 summary](https://creativecommons.org/licenses/by-sa/4.0/) for full details.
-
-If you choose to ship an alternative JSON dictionary, document its source and licensing accordingly.
-
-## Code License
-Unless noted otherwise, the source code for KanjiCards is released under the MIT License. See `LICENSE` for details.
-
-## Contributing
-Bug reports and pull requests are welcome. Please mention your Anki version, operating system, and any relevant console output when filing an issue.
-
-## Acknowledgements
-- The Anki developer community for the add-on API and documentation.
-- Electronic Dictionary Research & Development Group for maintaining the KANJIDIC2 dataset.
+## License
+KanjiCards is released under the MIT License. See `LICENSE` for the full text.
