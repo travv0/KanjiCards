@@ -9,7 +9,7 @@ KanjiCards keeps a kanji note type aligned with the characters that appear in th
 - Keeps kanji status tags up to date: optional markers for kanji that only appear in new vocab (`only_new_vocab_tag`) or no longer appear anywhere (`no_vocab_tag`), plus bucket tags for reviewed / unreviewed / no-vocab kanji if you configure them.
 - Unsuspends kanji cards that should come back for study and resuspends them (removing tags) if no configured vocab uses the character anymore.
 - Optionally auto-suspends vocab cards whose kanji are still unseen and unsuspends them once the matching kanji have been reviewed.
-- Reorders new kanji cards so they appear either by KANJIDIC frequency or by the order you will encounter them in vocabulary.
+- Reorders new kanji cards so they appear either by KANJIDIC frequency, by how often they show up in your vocab, or by the order you will encounter them in vocabulary.
 
 ## Getting Started
 1. Copy this folder into Anki’s `addons21` directory under `kanjicards` (or install it from AnkiWeb when available).

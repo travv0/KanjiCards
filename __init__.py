@@ -134,6 +134,7 @@ class KanjiUsageInfo:
     first_review_due: Optional[int] = None
     first_new_due: Optional[int] = None
     first_new_order: Optional[int] = None
+    vocab_occurrences: int = 0
 
 
 class KanjiVocabSyncManager:
@@ -529,7 +530,7 @@ class KanjiVocabSyncManager:
             prune_existing=True,
         )
 
-        if cfg.reorder_mode in {"frequency", "vocab"}:
+        if cfg.reorder_mode in {"frequency", "vocab", "vocab_frequency"}:
             reorder_stats = self._reorder_new_kanji_cards(
                 collection,
                 kanji_model,
@@ -1213,6 +1214,7 @@ class KanjiVocabSyncManager:
                         review_due_value = None
 
                 fields = flds.split("\x1f")
+                seen_in_note: Set[str] = set()
                 for field_index in field_indexes:
                     if field_index >= len(fields):
                         continue
@@ -1225,6 +1227,9 @@ class KanjiVocabSyncManager:
                         if info is None:
                             info = KanjiUsageInfo()
                             usage[char] = info
+                        if char not in seen_in_note:
+                            info.vocab_occurrences += 1
+                            seen_in_note.add(char)
                         if reviewed_flag:
                             info.reviewed = True
                             if review_rank is not None and (
@@ -1505,7 +1510,7 @@ class KanjiVocabSyncManager:
         dictionary: Dict[str, Dict[str, object]],
     ) -> Dict[str, int]:
         mode = cfg.reorder_mode
-        if mode not in {"frequency", "vocab"}:
+        if mode not in {"frequency", "vocab", "vocab_frequency"}:
             return {"cards_reordered": 0, "bucket_tags_updated": 0}
 
         rows = _db_all(
@@ -1551,7 +1556,14 @@ class KanjiVocabSyncManager:
             elif isinstance(freq_val, str) and freq_val.isdigit():
                 freq = int(freq_val)
 
-            key, bucket_id = self._build_reorder_key(mode, info, freq, due_value, card_id, has_vocab)
+            key, bucket_id = self._build_reorder_key(
+                mode,
+                info,
+                freq,
+                due_value,
+                card_id,
+                has_vocab,
+            )
             entries.append((key, card_id, due_value, original_mod, original_usn, note_id, bucket_id))
 
         if not entries:
@@ -1659,8 +1671,14 @@ class KanjiVocabSyncManager:
 
         bucket_id = int(vocab_tuple[0])
 
+        vocab_count = info.vocab_occurrences if has_vocab else 0
+
         if mode == "vocab":
             return vocab_tuple, bucket_id
+
+        if mode == "vocab_frequency":
+            appearance_tuple = (-vocab_count, *vocab_tuple)
+            return appearance_tuple, bucket_id
 
         # mode == "frequency"
         if has_frequency:
@@ -2282,8 +2300,13 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         self.auto_suspend_check.toggled.connect(self.auto_suspend_tag_edit.setEnabled)
         self.reorder_combo = QComboBox()
         self.reorder_combo.addItem("Frequency (KANJIDIC)", "frequency")
+        self.reorder_combo.addItem("Vocabulary frequency", "vocab_frequency")
         self.reorder_combo.addItem("Vocabulary order", "vocab")
-        current_mode = self.config.reorder_mode if self.config.reorder_mode in {"frequency", "vocab"} else "vocab"
+        current_mode = (
+            self.config.reorder_mode
+            if self.config.reorder_mode in {"frequency", "vocab", "vocab_frequency"}
+            else "vocab"
+        )
         index = self.reorder_combo.findData(current_mode)
         if index >= 0:
             self.reorder_combo.setCurrentIndex(index)
