@@ -366,10 +366,10 @@ class KanjiVocabSyncManager:
         except (ValueError, AttributeError):
             pass
         try:
-            gui_hooks.reviewer_will_answer_card.remove(self._on_reviewer_will_answer_card)
+            gui_hooks.reviewer_did_show_question.remove(self._on_reviewer_did_show_question)
         except (ValueError, AttributeError):
             pass
-        gui_hooks.reviewer_will_answer_card.append(self._on_reviewer_will_answer_card)
+        gui_hooks.reviewer_did_show_question.append(self._on_reviewer_did_show_question)
         gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
         self._install_sync_hook()
 
@@ -468,7 +468,7 @@ class KanjiVocabSyncManager:
 
         return stats
 
-    def _on_reviewer_will_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
+    def _on_reviewer_did_show_question(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
             return
         card_id = getattr(card, "id", None)
@@ -540,8 +540,7 @@ class KanjiVocabSyncManager:
 
         vocab_field_map = {model["id"]: indexes for model, indexes in vocab_map.values()}
 
-        existing_notes = {char: getattr(note, "id", None) for char in kanji_chars}
-        existing_notes = {char: note_id for char, note_id in existing_notes.items() if isinstance(note_id, int)}
+        existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
         if not existing_notes:
             return
 
