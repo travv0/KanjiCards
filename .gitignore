@@ -1,0 +1,11 @@
+# Python cache artifacts
+__pycache__/
+*.py[cod]
+
+# Test tooling
+.pytest_cache/
+.coverage
+
+# Local virtual environments
+.venv/
+venv/
