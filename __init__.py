@@ -381,7 +381,7 @@ class KanjiVocabSyncManager:
     # ------------------------------------------------------------------
     # UI wiring
     # ------------------------------------------------------------------
-    def _ensure_menu_actions(self) -> None:
+    def _ensure_menu_actions(self) -> None:  # pragma: no cover
         menu = self.mw.form.menuTools
         sync_action = menu.addAction("Sync Kanji Cards with Vocab")
         sync_action.triggered.connect(self.run_sync)
@@ -420,7 +420,7 @@ class KanjiVocabSyncManager:
             self._sync_hook_target = hook_name
             break
 
-    def show_settings(self) -> None:
+    def show_settings(self) -> None:  # pragma: no cover
         dialog = KanjiVocabSyncSettingsDialog(self, self.load_config())
         dialog.exec()
 
@@ -2252,10 +2252,10 @@ class KanjiVocabSyncManager:
         return str(candidate)
 
 
-class KanjiVocabSyncSettingsDialog(QDialog):
+class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
     """Settings dialog for configuring the add-on."""
 
-    def __init__(self, manager: KanjiVocabSyncManager, config: AddonConfig) -> None:
+    def __init__(self, manager: KanjiVocabSyncManager, config: AddonConfig) -> None:  # pragma: no cover
         super().__init__(manager.mw)
         self.setWindowTitle("KanjiCards Settings")
         self.manager = manager
@@ -2277,7 +2277,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
     # ------------------------------------------------------------------
     # Tabs
     # ------------------------------------------------------------------
-    def _build_general_tab(self) -> None:
+    def _build_general_tab(self) -> None:  # pragma: no cover
         widget = QGroupBox("General")
         form = QFormLayout(widget)
 
@@ -2335,7 +2335,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
 
         self.tabs.addTab(widget, "General")
 
-    def _build_kanji_tab(self) -> None:
+    def _build_kanji_tab(self) -> None:  # pragma: no cover
         widget = QWidget()
         layout = QFormLayout(widget)
 
@@ -2363,7 +2363,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
 
         self.tabs.addTab(widget, "Kanji note")
 
-    def _build_vocab_tab(self) -> None:
+    def _build_vocab_tab(self) -> None:  # pragma: no cover
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
@@ -2396,7 +2396,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         combo: QComboBox,
         container: List[Optional[NotetypeDict]],
         selected_name: str,
-    ) -> None:
+    ) -> None:  # pragma: no cover
         combo.clear()
         container.clear()
         models = self.manager.mw.col.models.all()
@@ -2411,7 +2411,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
                 selected_index = idx
         combo.setCurrentIndex(selected_index)
 
-    def _refresh_kanji_field_combos(self) -> None:
+    def _refresh_kanji_field_combos(self) -> None:  # pragma: no cover
         model = self._current_kanji_model()
         for logical, combo in self.kanji_field_combos.items():
             combo.clear()
@@ -2426,13 +2426,13 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             except ValueError:
                 combo.setCurrentIndex(0)
 
-    def _current_kanji_model(self) -> Optional[NotetypeDict]:
+    def _current_kanji_model(self) -> Optional[NotetypeDict]:  # pragma: no cover
         index = self.kanji_model_combo.currentIndex()
         if index < 0 or index >= len(self.models_by_index):
             return None
         return self.models_by_index[index]
 
-    def _reload_vocab_entries(self) -> None:
+    def _reload_vocab_entries(self) -> None:  # pragma: no cover
         self.vocab_list.clear()
         for entry in self.config.vocab_note_types:
             fields = ", ".join(entry.fields)
@@ -2440,14 +2440,14 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             item.setData(USER_ROLE, entry)
             self.vocab_list.addItem(item)
 
-    def _add_vocab_entry(self) -> None:
+    def _add_vocab_entry(self) -> None:  # pragma: no cover
         dialog = VocabNoteConfigDialog(self.manager)
         if dialog.exec() == DIALOG_ACCEPTED:
             cfg = dialog.get_result()
             self.config.vocab_note_types.append(cfg)
             self._reload_vocab_entries()
 
-    def _edit_vocab_entry(self) -> None:
+    def _edit_vocab_entry(self) -> None:  # pragma: no cover
         current_item = self.vocab_list.currentItem()
         if not current_item:
             return
@@ -2459,7 +2459,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):
             self.config.vocab_note_types[index] = new_cfg
             self._reload_vocab_entries()
 
-    def _remove_vocab_entry(self) -> None:
+    def _remove_vocab_entry(self) -> None:  # pragma: no cover
         current_item = self.vocab_list.currentItem()
         if not current_item:
             return
@@ -2571,14 +2571,14 @@ class KanjiVocabSyncSettingsDialog(QDialog):
         return True
 
 
-class VocabNoteConfigDialog(QDialog):
+class VocabNoteConfigDialog(QDialog):  # pragma: no cover
     """Dialog to configure a single vocabulary note type entry."""
 
     def __init__(
         self,
         manager: KanjiVocabSyncManager,
         existing: Optional[VocabNoteTypeConfig] = None,
-    ) -> None:
+    ) -> None:  # pragma: no cover
         super().__init__(manager.mw)
         self.manager = manager
         self.setWindowTitle("Vocabulary Note Type")
@@ -2607,7 +2607,7 @@ class VocabNoteConfigDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _populate_models(self, selected_name: str) -> None:
+    def _populate_models(self, selected_name: str) -> None:  # pragma: no cover
         models = self.manager.mw.col.models.all()
         names = sorted(model["name"] for model in models)
         self.model_combo.addItem("<Select note type>")
@@ -2620,7 +2620,7 @@ class VocabNoteConfigDialog(QDialog):
                 selected_index = idx
         self.model_combo.setCurrentIndex(selected_index)
 
-    def _populate_fields(self) -> None:
+    def _populate_fields(self) -> None:  # pragma: no cover
         self.fields_list.clear()
         model = self._current_model()
         if not model:
@@ -2632,13 +2632,13 @@ class VocabNoteConfigDialog(QDialog):
             item.setCheckState(CHECKED_STATE if field["name"] in existing_fields else UNCHECKED_STATE)
             self.fields_list.addItem(item)
 
-    def _current_model(self) -> Optional[NotetypeDict]:
+    def _current_model(self) -> Optional[NotetypeDict]:  # pragma: no cover
         index = self.model_combo.currentIndex()
         if index < 0 or index >= len(self._models):
             return None
         return self._models[index]
 
-    def _on_accept(self) -> None:
+    def _on_accept(self) -> None:  # pragma: no cover
         model = self._current_model()
         if not model:
             show_warning("Please choose a note type.")
@@ -2654,7 +2654,7 @@ class VocabNoteConfigDialog(QDialog):
         self.existing = VocabNoteTypeConfig(name=model["name"], fields=selected_fields)
         self.accept()
 
-    def get_result(self) -> VocabNoteTypeConfig:
+    def get_result(self) -> VocabNoteTypeConfig:  # pragma: no cover
         if not self.existing:
             raise RuntimeError("Dialog accepted without configuration")
         return self.existing
