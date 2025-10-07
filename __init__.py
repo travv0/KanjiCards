@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections import defaultdict
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -150,12 +151,16 @@ class KanjiVocabSyncManager:
         self._sync_hook_target: Optional[str] = None
         self._profile_config_error_logged = False
         self._pre_answer_card_state: Dict[int, Tuple[Optional[int], Optional[int]]] = {}
+        self._debug_path: Optional[str] = None
+        self._debug_enabled = True
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
         else:
             # Fallback for development environments where the addon manager does not know the module.
             self.addon_dir = os.path.dirname(__file__)
+        self._debug_path = os.path.join(self.addon_dir, "kanjicards_debug.log")
+        self._debug("manager_init", addon_dir=self.addon_dir)
         self._ensure_menu_actions()
         self._install_hooks()
         self._install_sync_hook()
@@ -175,6 +180,27 @@ class KanjiVocabSyncManager:
         if not folder:
             return None
         return os.path.join(folder, "kanjicards_config.json")
+
+    def _debug(self, message: str, **extra: object) -> None:
+        if not self._debug_enabled:
+            return
+        path = self._debug_path
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            payload = message
+            if extra:
+                try:
+                    serialized = json.dumps(extra, ensure_ascii=False, sort_keys=True, default=str)
+                except Exception:
+                    serialized = str(extra)
+                payload = f"{payload} {serialized}"
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(f"{timestamp} {payload}\n")
+        except Exception:
+            pass
 
     def _load_profile_config(self) -> Dict[str, Any]:
         path = self._profile_config_path()
@@ -479,6 +505,12 @@ class KanjiVocabSyncManager:
         queue = getattr(card, "queue", None)
         stored_queue = queue if isinstance(queue, int) else None
         self._pre_answer_card_state[card_id] = (stored_type, stored_queue)
+        self._debug(
+            "realtime/question",
+            card_id=card_id,
+            card_type=stored_type,
+            queue=stored_queue,
+        )
 
     def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
@@ -499,20 +531,29 @@ class KanjiVocabSyncManager:
 
         cfg = self.load_config()
         if not cfg.realtime_review:
+            self._debug("realtime/skip", reason="realtime_disabled")
             return
 
         try:
             kanji_model, _, kanji_field_index = self._get_kanji_model_context(collection, cfg)
         except RuntimeError:
             # Configuration incomplete; wait until user configures properly.
+            self._debug("realtime/skip", reason="kanji_model_unavailable")
             return
 
         try:
             note = card.note()
         except Exception:  # noqa: BLE001
+            self._debug("realtime/skip", reason="note_lookup_failed")
             return
 
         if note.mid != kanji_model.get("id"):
+            self._debug(
+                "realtime/skip",
+                reason="not_kanji_note",
+                note_mid=note.mid,
+                kanji_mid=kanji_model.get("id"),
+            )
             return
 
         try:
@@ -525,6 +566,7 @@ class KanjiVocabSyncManager:
             kanji_chars.update(KANJI_PATTERN.findall(fields[kanji_field_index]))
 
         if not kanji_chars:
+            self._debug("realtime/skip", reason="no_kanji_chars", card_id=card_id)
             return
 
         card_id = getattr(card, "id", None)
@@ -536,29 +578,36 @@ class KanjiVocabSyncManager:
                 prev_type, prev_queue = prev_state
         was_new = (prev_queue == 0) or (prev_queue is None and prev_type == 0)
         if not was_new:
+            self._debug(
+                "realtime/skip",
+                reason="not_new",
+                prev_type=prev_type,
+                prev_queue=prev_queue,
+            )
             return
 
         if not cfg.vocab_note_types:
+            self._debug("realtime/skip", reason="no_vocab_types")
             return
 
         vocab_map = self._get_vocab_model_map(collection, cfg)
         if not vocab_map:
+            self._debug("realtime/skip", reason="vocab_map_empty")
             return
 
         vocab_field_map = {model["id"]: indexes for model, indexes in vocab_map.values()}
-
-        print(
-            "[KanjiCards] realtime trigger",
-            {
-                "chars": "".join(sorted(kanji_chars)),
-                "card_id": card_id,
-                "note_id": getattr(note, "id", None),
-                "was_new": was_new,
-            },
+        self._debug(
+            "realtime/process",
+            card_id=card_id,
+            note_id=getattr(note, "id", None),
+            chars="".join(sorted(kanji_chars)),
+            prev_type=prev_type,
+            prev_queue=prev_queue,
         )
 
         existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
         if not existing_notes:
+            self._debug("realtime/skip", reason="no_existing_notes")
             return
 
         self._update_vocab_suspension(
@@ -1591,9 +1640,17 @@ class KanjiVocabSyncManager:
         stats = {"vocab_suspended": 0, "vocab_unsuspended": 0}
         tag = cfg.auto_suspend_tag.strip()
         if not tag:
+            self._debug("realtime/skip", reason="no_suspend_tag")
             return stats
+        target_display = "".join(sorted(target_chars)) if target_chars else ""
+        self._debug(
+            "realtime/update_start",
+            target=target_display,
+            force="".join(sorted(force_chars_reviewed)) if force_chars_reviewed else "",
+        )
         notes_info = self._collect_vocab_note_chars(collection, vocab_field_map, target_chars)
         if not notes_info:
+            self._debug("realtime/update_empty", target=target_display)
             return stats
         tag_lower = tag.lower()
         kanji_reviewed = self._compute_kanji_reviewed_flags(collection, existing_notes)
@@ -1601,14 +1658,11 @@ class KanjiVocabSyncManager:
             for char in force_chars_reviewed:
                 if char:
                     kanji_reviewed[char] = True
-        if force_chars_reviewed:
-            print(
-                "[KanjiCards] realtime status",
-                {
-                    "target": "".join(sorted(force_chars_reviewed)),
-                    "notes": len(notes_info),
-                    "has_tag": tag,
-                },
+            self._debug(
+                "realtime/status",
+                target="".join(sorted(force_chars_reviewed)),
+                notes=len(notes_info),
+                tag=tag,
             )
         card_map = self._load_card_status_for_notes(collection, notes_info.keys())
 
@@ -1619,13 +1673,10 @@ class KanjiVocabSyncManager:
             cards = card_map.get(note_id, [])
             if cfg.auto_suspend_vocab:
                 if requires_suspend:
-                    print(
-                        "[KanjiCards] realtime keep suspended",
-                        {
-                            "note": note_id,
-                            "chars": "".join(sorted(chars)),
-                            "requires_suspend": True,
-                        },
+                    self._debug(
+                        "realtime/keep_suspended",
+                        note_id=note_id,
+                        chars="".join(sorted(chars)),
                     )
                     unsuspended_cards = [card_id for card_id, queue in cards if queue != -1]
                     if not unsuspended_cards:
@@ -1647,13 +1698,11 @@ class KanjiVocabSyncManager:
                 note = _get_note(collection, note_id)
                 changed = False
                 if suspended_cards:
-                    print(
-                        "[KanjiCards] realtime unsuspend",
-                        {
-                            "note": note_id,
-                            "chars": "".join(sorted(chars)),
-                            "count": len(suspended_cards),
-                        },
+                    self._debug(
+                        "realtime/unsuspend",
+                        note_id=note_id,
+                        chars="".join(sorted(chars)),
+                        count=len(suspended_cards),
                     )
                     _unsuspend_cards(collection, suspended_cards)
                     stats["vocab_unsuspended"] += len(suspended_cards)
