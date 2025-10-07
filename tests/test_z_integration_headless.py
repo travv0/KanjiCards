@@ -139,7 +139,91 @@ def test_headless_apply_updates_creates_real_notes(real_env):
 
     kanji_model_resolved, field_indexes, kanji_field_index = manager._get_kanji_model_context(col, cfg)
     manager._normalize_bucket_tags(None)
+    manager._normalize_bucket_tags({"reviewed_vocab": " keep ", "extra": "x"})
     manager._config_from_raw({"vocab_note_types": ["bad"], "kanji_note_type": []})
+
+    bad_cfg = KC.AddonConfig(
+        vocab_note_types=[],
+        kanji_note_type=KC.KanjiNoteTypeConfig(name="", fields=kanji_fields),
+        existing_tag="",
+        created_tag="",
+        bucket_tags={key: "" for key in KC.BUCKET_TAG_KEYS},
+        only_new_vocab_tag="",
+        no_vocab_tag="",
+        dictionary_file="",
+        kanji_deck_name="",
+        auto_run_on_sync=False,
+        realtime_review=False,
+        unsuspended_tag="",
+        reorder_mode="vocab",
+        ignore_suspended_vocab=False,
+        auto_suspend_vocab=False,
+        auto_suspend_tag="",
+    )
+    with pytest.raises(RuntimeError):
+        manager._get_kanji_model_context(col, bad_cfg)
+    missing_cfg = KC.AddonConfig(
+        vocab_note_types=[],
+        kanji_note_type=KC.KanjiNoteTypeConfig(name="Missing", fields=kanji_fields),
+        existing_tag="",
+        created_tag="",
+        bucket_tags={key: "" for key in KC.BUCKET_TAG_KEYS},
+        only_new_vocab_tag="",
+        no_vocab_tag="",
+        dictionary_file="",
+        kanji_deck_name="",
+        auto_run_on_sync=False,
+        realtime_review=False,
+        unsuspended_tag="",
+        reorder_mode="vocab",
+        ignore_suspended_vocab=False,
+        auto_suspend_vocab=False,
+        auto_suspend_tag="",
+    )
+    with pytest.raises(RuntimeError):
+        manager._get_kanji_model_context(col, missing_cfg)
+
+    bad_field_cfg = KC.AddonConfig(
+        vocab_note_types=[],
+        kanji_note_type=KC.KanjiNoteTypeConfig(name=kanji_model["name"], fields={**kanji_fields, "kanji": ""}),
+        existing_tag="",
+        created_tag="",
+        bucket_tags={key: "" for key in KC.BUCKET_TAG_KEYS},
+        only_new_vocab_tag="",
+        no_vocab_tag="",
+        dictionary_file="",
+        kanji_deck_name="",
+        auto_run_on_sync=False,
+        realtime_review=False,
+        unsuspended_tag="",
+        reorder_mode="vocab",
+        ignore_suspended_vocab=False,
+        auto_suspend_vocab=False,
+        auto_suspend_tag="",
+    )
+    with pytest.raises(RuntimeError):
+        manager._get_kanji_model_context(col, bad_field_cfg)
+
+    missing_field_cfg = KC.AddonConfig(
+        vocab_note_types=[],
+        kanji_note_type=KC.KanjiNoteTypeConfig(name=kanji_model["name"], fields={**kanji_fields, "kanji": "MissingField"}),
+        existing_tag="",
+        created_tag="",
+        bucket_tags={key: "" for key in KC.BUCKET_TAG_KEYS},
+        only_new_vocab_tag="",
+        no_vocab_tag="",
+        dictionary_file="",
+        kanji_deck_name="",
+        auto_run_on_sync=False,
+        realtime_review=False,
+        unsuspended_tag="",
+        reorder_mode="vocab",
+        ignore_suspended_vocab=False,
+        auto_suspend_vocab=False,
+        auto_suspend_tag="",
+    )
+    with pytest.raises(RuntimeError):
+        manager._get_kanji_model_context(col, missing_field_cfg)
 
     vocab_note = col.new_note(vocab_model)
     vocab_note["Front"] = "火山"
@@ -167,6 +251,8 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         cfg,
         usage_info,
     )
+    with pytest.raises(RuntimeError):
+        manager._resolve_field_indexes(kanji_model_resolved, {"missing": "Nope"})
 
     assert stats["created"] == 1
     note_rows = col.db.all("select flds, tags from notes where mid = ?", kanji_model_resolved["id"])
@@ -179,14 +265,32 @@ def test_headless_apply_updates_creates_real_notes(real_env):
     manager._progress_step(None, "skip")
     tracker = {"progress": types.SimpleNamespace(update="not callable")}
     manager._progress_step(tracker, "no-op")
+    class FailingProgress:
+        def update(self, **kwargs):
+            raise TypeError("fail")
+
+    manager._progress_step({"progress": FailingProgress(), "current": 0, "max": 1}, "TypeError")
     tracker_callable = {
         "progress": types.SimpleNamespace(update=lambda **kwargs: None),
         "current": 0,
         "max": 2,
     }
-    manager.mw.taskman = types.SimpleNamespace(run_on_main=lambda fn: (_ for _ in ()).throw(RuntimeError("fail")))
     def bad_run(fn):
         raise RuntimeError("fail")
 
     manager.mw.taskman = types.SimpleNamespace(run_on_main=bad_run)
     manager._progress_step(tracker_callable, "Step")
+
+    extra_note = col.new_note(kanji_model_resolved)
+    extra_note["Character"] = "水"
+    col.add_note(extra_note, deck_id)
+    mapping = manager._index_existing_kanji_notes(col, kanji_model_resolved, field_indexes["kanji"])
+    assert isinstance(mapping, dict)
+    manager._existing_notes_cache = None
+    cached = manager._get_existing_kanji_notes(col, kanji_model_resolved, field_indexes["kanji"])
+    assert set(mapping.keys()).issubset(set(cached.keys()))
+    cached_again = manager._get_existing_kanji_notes(col, kanji_model_resolved, field_indexes["kanji"])
+    assert cached_again == cached
+
+    vocab_map = manager._get_vocab_model_map(col, cfg)
+    assert vocab_model["id"] in vocab_map

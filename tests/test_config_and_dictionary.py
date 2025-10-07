@@ -87,6 +87,17 @@ def test_config_roundtrip(manager, kanjicards_module):
     assert serialized["bucket_tags"]["reviewed_vocab"] == "rev"
 
 
+def test_config_from_raw_missing_field(manager, kanjicards_module):
+    raw = {
+        "vocab_note_types": [
+            {"note_type": "Valid", "fields": ["Front", "Missing"]},
+        ],
+        "kanji_note_type": {"name": "Kanji", "fields": {"kanji": "Character"}},
+    }
+    cfg = manager._config_from_raw(raw)
+    assert cfg.vocab_note_types[0].fields == ["Front", "Missing"]
+
+
 def test_config_from_raw_handles_invalid_entries(manager):
     raw = {
         "vocab_note_types": ["bad", {"note_type": "Valid", "fields": ["Front"]}],
@@ -111,6 +122,13 @@ def test_load_dictionary_json_frequency_normalization(manager):
     assert data["水"]["frequency"] is None
 
 
+def test_load_dictionary_json_invalid(manager):
+    bad_path = Path(manager.addon_dir) / "invalid.json"
+    bad_path.write_text("[]", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        manager._load_dictionary_json(str(bad_path))
+
+
 def test_load_dictionary_uses_cache_and_relative_path(manager):
     path = Path(manager.addon_dir) / "cache.json"
     path.write_text(json.dumps({"火": {"definition": "fire"}}), encoding="utf-8")
@@ -122,6 +140,11 @@ def test_load_dictionary_uses_cache_and_relative_path(manager):
     data_second = manager._load_dictionary("cache.json")
     assert data_second["火"]["definition"] == "updated"
     assert data_first is not data_second
+
+
+def test_load_dictionary_missing_file(manager):
+    with pytest.raises(RuntimeError):
+        manager._load_dictionary("missing.json")
 
 
 def test_load_dictionary_kanjidic_parses_entries(manager):
@@ -166,3 +189,26 @@ def test_load_dictionary_kanjidic_parses_entries(manager):
     assert data["火"]["onyomi"] == ["カ"]
     assert data["火"]["frequency"] == 3
     assert data["林"]["stroke_count"] == 8
+
+
+def test_load_dictionary_kanjidic_invalid_xml(manager):
+    xml_path = Path(manager.addon_dir) / "bad.xml"
+    xml_path.write_text("<notxml>", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        manager._load_dictionary_kanjidic(str(xml_path))
+
+
+def test_load_dictionary_handles_xml_path(manager):
+    xml_path = Path(manager.addon_dir) / "dict.xml"
+    xml_path.write_text(
+        """
+        <kanjidic2>
+          <character>
+            <literal>火</literal>
+          </character>
+        </kanjidic2>
+        """,
+        encoding="utf-8",
+    )
+    data = manager._load_dictionary(str(xml_path))
+    assert "火" in data
