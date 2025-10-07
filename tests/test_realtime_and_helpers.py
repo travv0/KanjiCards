@@ -380,7 +380,7 @@ def test_notify_summary_formats_message(manager, kanjicards_module, monkeypatch)
     assert messages
 
 
-def test_progress_step_runs_update(manager):
+def test_progress_step_runs_update(manager, kanjicards_module, monkeypatch):
     updates = []
 
     class FakeProgress:
@@ -393,6 +393,11 @@ def test_progress_step_runs_update(manager):
 
     manager.mw = types.SimpleNamespace(taskman=FakeTaskman())
     tracker = {"progress": FakeProgress(), "current": 0, "max": 2}
+    monkeypatch.setattr(
+        kanjicards_module.QApplication,
+        "processEvents",
+        staticmethod(lambda: (_ for _ in ()).throw(RuntimeError("process failure"))),
+    )
     manager._progress_step(tracker, "Step")
     assert updates and updates[0]["label"] == "Step"
     assert tracker["current"] == 1

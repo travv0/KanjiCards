@@ -1,0 +1,239 @@
+import types
+from pathlib import Path
+
+import pytest
+
+
+class Hook:
+    def __init__(self) -> None:
+        self.callbacks = []
+
+    def append(self, callback) -> None:
+        if callback not in self.callbacks:
+            self.callbacks.append(callback)
+
+    def remove(self, callback) -> None:
+        if callback in self.callbacks:
+            self.callbacks.remove(callback)
+
+
+class FakeSignal:
+    def __init__(self) -> None:
+        self.connected = []
+
+    def connect(self, callback) -> None:
+        self.connected.append(callback)
+
+
+class FakeAction:
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.triggered = FakeSignal()
+
+
+class FakeMenu:
+    def __init__(self) -> None:
+        self.actions = []
+
+    def addAction(self, label: str):
+        action = FakeAction(label)
+        self.actions.append(action)
+        return action
+
+
+class FakeAddonManager:
+    def __init__(self, addons_folder: str) -> None:
+        self._addons_folder = addons_folder
+        self.config_actions = {}
+        self.written_configs = {}
+
+    def addonFromModule(self, module_name: str) -> str:
+        return "KanjiCards"
+
+    def addonsFolder(self) -> str:
+        return self._addons_folder
+
+    def setConfigAction(self, module_name: str, action) -> None:
+        self.config_actions[module_name] = action
+
+    def getConfig(self, module_name: str) -> dict:
+        return {}
+
+    def writeConfig(self, module_name: str, data: dict) -> None:
+        self.written_configs[module_name] = data
+
+
+class FakeProgress:
+    def __init__(self) -> None:
+        self.started = False
+        self.finished = False
+        self.updates = []
+        self.busy_values = []
+
+    def start(self, **kwargs) -> None:
+        self.started = True
+
+    def finish(self) -> None:
+        self.finished = True
+
+    def update(self, **kwargs) -> None:
+        self.updates.append(kwargs)
+
+    def busy(self) -> bool:
+        if self.busy_values:
+            return self.busy_values.pop(0)
+        return False
+
+
+class FakeTaskman:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def run_on_main(self, callback) -> None:
+        self.calls.append(callback)
+        callback()
+
+
+class FakeMainWindow:
+    def __init__(self, base_dir: Path) -> None:
+        progress = FakeProgress()
+        self.form = types.SimpleNamespace(menuTools=FakeMenu())
+        self.progress = progress
+        self.taskman = FakeTaskman()
+        self.pm = types.SimpleNamespace(profileFolder=lambda: str(base_dir))
+        self.addonManager = FakeAddonManager(str(base_dir / "addons"))
+        self._checkpoints = []
+        self._reset_calls = 0
+        self.col = types.SimpleNamespace()
+
+    def checkpoint(self, name: str) -> None:
+        self._checkpoints.append(name)
+
+    def reset(self) -> None:
+        self._reset_calls += 1
+
+
+@pytest.fixture
+def manager_with_mw(kanjicards_module, tmp_path, monkeypatch):
+    hooks = types.SimpleNamespace(
+        profile_did_open=Hook(),
+        main_window_did_init=Hook(),
+        reviewer_did_answer_card=Hook(),
+        reviewer_did_show_question=Hook(),
+        sync_did_finish=Hook(),
+        sync_will_start=Hook(),
+    )
+    monkeypatch.setattr(kanjicards_module, "gui_hooks", hooks)
+    mw = FakeMainWindow(tmp_path)
+    monkeypatch.setattr(kanjicards_module, "mw", mw)
+    manager = kanjicards_module.KanjiVocabSyncManager()
+    yield manager, mw, hooks
+
+
+def test_manager_init_wires_menu_and_hooks(manager_with_mw, kanjicards_module):
+    manager, mw, hooks = manager_with_mw
+    labels = [action.label for action in mw.form.menuTools.actions]
+    assert "Sync Kanji Cards with Vocab" in labels
+    assert "KanjiCards Settings" in labels
+    assert manager._on_reviewer_did_show_question in hooks.reviewer_did_show_question.callbacks
+    assert manager._on_reviewer_did_answer_card in hooks.reviewer_did_answer_card.callbacks
+    assert manager._on_sync_event in hooks.sync_did_finish.callbacks or manager._on_sync_event in hooks.sync_will_start.callbacks
+    assert kanjicards_module.__name__ in mw.addonManager.config_actions
+
+
+def test_manager_init_without_registered_addon(monkeypatch, kanjicards_module, tmp_path):
+    hooks = types.SimpleNamespace(
+        profile_did_open=Hook(),
+        main_window_did_init=Hook(),
+        reviewer_did_answer_card=Hook(),
+        reviewer_did_show_question=Hook(),
+        sync_did_finish=Hook(),
+        sync_will_start=Hook(),
+    )
+    monkeypatch.setattr(kanjicards_module, "gui_hooks", hooks)
+    mw = FakeMainWindow(tmp_path)
+    mw.addonManager = types.SimpleNamespace(
+        addonFromModule=lambda name: "",
+        addonsFolder=lambda: str(tmp_path / "addons"),
+        setConfigAction=lambda *args, **kwargs: None,
+        getConfig=lambda name: {},
+        writeConfig=lambda name, data: None,
+    )
+    monkeypatch.setattr(kanjicards_module, "mw", mw)
+    manager = kanjicards_module.KanjiVocabSyncManager()
+    assert Path(manager.addon_dir) == Path(kanjicards_module.__file__).parent
+
+
+def test_show_settings_uses_dialog(manager_with_profile, kanjicards_module, monkeypatch):
+    recorded = {}
+
+    class DummyDialog:
+        def __init__(self, manager, cfg):
+            recorded["cfg"] = cfg
+
+        def exec(self):
+            recorded["exec"] = True
+
+    monkeypatch.setattr(kanjicards_module, "KanjiVocabSyncSettingsDialog", DummyDialog)
+    manager_with_profile.load_config = lambda: {"existing_tag": "x"}  # type: ignore[assignment]
+    manager_with_profile.show_settings()
+    assert recorded["exec"] is True
+
+
+def test_run_sync_success_and_failure(manager_with_profile, kanjicards_module, monkeypatch, tmp_path):
+    mw = FakeMainWindow(tmp_path)
+    manager_with_profile.mw = mw
+    manager_with_profile.addon_dir = str(tmp_path)
+    stats_called = {}
+    monkeypatch.setattr(manager_with_profile, "_notify_summary", lambda stats: stats_called.setdefault("stats", stats))
+    manager_with_profile._sync_internal = lambda **kwargs: {"created": 1}  # type: ignore[assignment]
+
+    result = manager_with_profile.run_sync()
+    assert result["created"] == 1
+    assert stats_called["stats"]["created"] == 1
+    assert mw.progress.finished is True
+    assert mw._reset_calls == 1
+
+    manager_with_profile._sync_internal = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[assignment]
+    called = {}
+    monkeypatch.setattr(kanjicards_module, "show_critical", lambda message: called.setdefault("message", message))
+    assert manager_with_profile.run_sync() is None
+    assert "boom" in called["message"]
+
+
+def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicards_module, monkeypatch, tmp_path):
+    mw = FakeMainWindow(tmp_path)
+    manager_with_profile.mw = mw
+    manager_with_profile._suppress_next_auto_sync = False
+    cfg = manager_with_profile._config_from_raw(
+        {
+            "kanji_note_type": {"name": "Kanji", "fields": {}},
+            "vocab_note_types": [],
+            "auto_run_on_sync": True,
+        }
+    )
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
+    manager_with_profile._stats_warrant_sync = lambda stats: True  # type: ignore[assignment]
+    manager_with_profile.run_sync = lambda: {"created": 1}  # type: ignore[assignment]
+    manager_with_profile._trigger_followup_sync = lambda: True  # type: ignore[assignment]
+    mw.col = object()
+    mw.progress.busy_values = [True, False]
+
+    delays = []
+
+    def fake_single_shot(delay, callback):
+        delays.append(delay)
+        callback()
+
+    monkeypatch.setattr(kanjicards_module.QTimer, "singleShot", fake_single_shot)
+
+    manager_with_profile._on_sync_event()
+
+    assert delays.count(200) >= 2
+    assert manager_with_profile._suppress_next_auto_sync is True
+
+
+def test_on_sync_event_respects_suppression(manager_with_profile):
+    manager_with_profile._suppress_next_auto_sync = True
+    manager_with_profile._on_sync_event()
+    assert manager_with_profile._suppress_next_auto_sync is False

@@ -1,4 +1,5 @@
 import importlib
+import os
 import sys
 import types
 from typing import Any, Dict
@@ -267,3 +268,54 @@ def stub_anki_env() -> None:
 @pytest.fixture(scope="session")
 def kanjicards_module(stub_anki_env):
     return importlib.import_module("KanjiCards")
+
+
+@pytest.fixture
+def manager_with_profile(kanjicards_module, tmp_path):
+    class _AddonManager:
+        def __init__(self, folder: str) -> None:
+            self._folder = folder
+            self.config_actions = {}
+            self.written_configs = []
+            self._config = {}
+
+        def addonFromModule(self, module_name: str) -> str:
+            return "KanjiCards"
+
+        def addonsFolder(self) -> str:
+            return self._folder
+
+        def setConfigAction(self, module_name: str, action) -> None:
+            self.config_actions[module_name] = action
+
+        def getConfig(self, module_name: str) -> dict:
+            return dict(self._config)
+
+        def writeConfig(self, module_name: str, data: dict) -> None:
+            self._config = dict(data)
+            self.written_configs.append((module_name, data))
+
+    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    profile_dir = tmp_path / "profile"
+    profile_dir.mkdir()
+    addons_folder = tmp_path / "addons"
+    addons_folder.mkdir()
+    manager.mw = types.SimpleNamespace(
+        pm=types.SimpleNamespace(profileFolder=lambda: str(profile_dir)),
+        addonManager=_AddonManager(str(addons_folder)),
+    )
+    manager.addon_name = "KanjiCards"
+    manager.addon_dir = str(tmp_path / "addon")
+    os.makedirs(manager.addon_dir, exist_ok=True)
+    manager._debug_path = str(tmp_path / "debug.log")
+    manager._debug_enabled = False
+    manager._profile_config_error_logged = False
+    manager._dictionary_cache = None
+    manager._existing_notes_cache = None
+    manager._kanji_model_cache = None
+    manager._vocab_model_cache = None
+    manager._realtime_error_logged = False
+    manager._missing_deck_logged = False
+    manager._sync_hook_installed = False
+    manager._sync_hook_target = None
+    return manager

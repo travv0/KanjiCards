@@ -545,3 +545,79 @@ def test_sync_internal_aggregates_stats(manager, kanjicards_module, monkeypatch)
     assert stats["cards_reordered"] == 2
     assert stats["vocab_suspended"] == 3
     assert stats["vocab_unsuspended"] == 4
+
+
+def test_create_kanji_note_populates_fields(manager, kanjicards_module, monkeypatch):
+    model = make_model()
+    collection = FakeCollection(model)
+    cfg = make_config(kanjicards_module)
+    field_indexes = {
+        "kanji": 0,
+        "definition": 1,
+        "stroke_count": 2,
+        "kunyomi": 3,
+        "onyomi": 4,
+        "frequency": 5,
+    }
+    entry = {
+        "definition": "fire",
+        "stroke_count": 4,
+        "kunyomi": ["ひ"],
+        "onyomi": ["カ"],
+        "frequency": 12,
+    }
+    monkeypatch.setattr(manager, "_resolve_deck_id", lambda *args: 1)
+    monkeypatch.setattr(kanjicards_module, "_add_note", lambda col, note, deck_id: col.add_note(note, deck_id))
+
+    note_id = manager._create_kanji_note(
+        collection,
+        model,
+        field_indexes,
+        entry,
+        "火",
+        "existing",
+        "created",
+        cfg,
+    )
+    assert note_id is not None
+    note = collection.get_note(note_id)
+    assert note["Character"] == "火"
+    assert note["Meaning"] == "fire"
+    assert "existing" in note.tags and "created" in note.tags
+    assert note["Kunyomi"] == "ひ"
+    assert note["Onyomi"] == "カ"
+    assert note["Frequency"] == "12"
+
+
+def test_create_kanji_note_returns_none_when_add_fails(manager, kanjicards_module, monkeypatch):
+    model = make_model()
+    collection = FakeCollection(model)
+    cfg = make_config(kanjicards_module)
+    field_indexes = {"kanji": 0}
+    entry = {}
+    monkeypatch.setattr(manager, "_resolve_deck_id", lambda *args: 1)
+
+    def fail_add_note(col, note, deck_id):
+        return False
+
+    monkeypatch.setattr(kanjicards_module, "_add_note", fail_add_note)
+    result = manager._create_kanji_note(
+        collection,
+        model,
+        field_indexes,
+        entry,
+        "火",
+        "",
+        "",
+        cfg,
+    )
+    assert result is None
+
+
+def test_sync_internal_requires_configured_kanji(manager, kanjicards_module):
+    cfg = make_config(kanjicards_module)
+    cfg.kanji_note_type.name = ""
+    manager.load_config = lambda: cfg
+    manager.mw = types.SimpleNamespace(col=types.SimpleNamespace())
+    with pytest.raises(RuntimeError):
+        manager._sync_internal()

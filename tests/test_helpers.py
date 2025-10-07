@@ -45,6 +45,7 @@ class FakeCollection:
 def manager(kanjicards_module):
     manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
     manager.mw = types.SimpleNamespace()
+    manager._missing_deck_logged = False
     return manager
 
 
@@ -153,3 +154,151 @@ def test_format_helpers_and_update_frequency(manager):
     assert note["Frequency"] == "5"
     unchanged = manager._update_frequency_field(note, "Frequency", 5)
     assert unchanged is False
+
+
+def test_assign_field_handles_missing_name(manager):
+    note = FakeNote(5)
+    manager._assign_field(note, "Field", "Value")
+    assert note["Field"] == "Value"
+    manager._assign_field(note, None, "Ignored")
+    assert note._fields["Field"] == "Value"
+
+
+def test_unsuspend_note_cards_if_needed(manager, kanjicards_module, monkeypatch):
+    note = FakeNote(6, tags=[])
+    collection = types.SimpleNamespace(conf={"leechTag": "Leech"})
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_db_all",
+        lambda *args, **kwargs: [(11, -1), (12, -1)],
+    )
+    calls = []
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda col, ids: calls.extend(ids),
+    )
+    count = manager._unsuspend_note_cards_if_needed(collection, note, "Unsuspend")
+    assert count == 2
+    assert calls == [11, 12]
+    assert "Unsuspend" in note.tags
+    assert note.flush_count == 1
+
+
+def test_unsuspend_note_cards_if_needed_skips_leech(manager, kanjicards_module, monkeypatch):
+    note = FakeNote(7, tags=["Leech"])
+    collection = types.SimpleNamespace(conf={"leechTag": "Leech"})
+    called = []
+    monkeypatch.setattr(kanjicards_module, "_db_all", lambda *args, **kwargs: called.append(True))
+    count = manager._unsuspend_note_cards_if_needed(collection, note, "Unsuspend")
+    assert count == 0
+    assert called == []
+
+
+def test_deck_entry_name_variants(manager):
+    entry_obj = types.SimpleNamespace(name="DeckObj")
+    assert manager._deck_entry_name(entry_obj) == "DeckObj"
+    entry_tuple = ("DeckTuple", 2)
+    assert manager._deck_entry_name(entry_tuple) == "DeckTuple"
+    entry_str = "DeckStr"
+    assert manager._deck_entry_name(entry_str) == "DeckStr"
+    assert manager._deck_entry_name(None) is None
+
+
+def test_lookup_deck_id_prefers_methods(manager):
+    decks = types.SimpleNamespace(
+        id_for_name=lambda name: 321 if name == "Target" else None,
+        all_names_and_ids=lambda: [],
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    assert manager._lookup_deck_id(collection, "Target") == 321
+
+
+def test_lookup_deck_id_scans_entries(manager):
+    decks = types.SimpleNamespace(
+        all_names_and_ids=lambda: [types.SimpleNamespace(name="Target", id=654), ("Other", 777), ("Target", 888)],
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    assert manager._lookup_deck_id(collection, "Target") == 654
+
+
+def test_resolve_deck_id_uses_lookup(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(kanjicards_module, kanji_deck_name="Target")
+    collection = types.SimpleNamespace(decks=types.SimpleNamespace())
+    monkeypatch.setattr(manager, "_lookup_deck_id", lambda *args: 123)
+    manager._missing_deck_logged = True
+    result = manager._resolve_deck_id(collection, {"did": 55}, cfg)
+    assert result == 123
+    assert manager._missing_deck_logged is False
+
+
+def test_resolve_deck_id_falls_back_to_model(manager, kanjicards_module, capsys, monkeypatch):
+    cfg = make_config(kanjicards_module, kanji_deck_name="Missing")
+    decks = types.SimpleNamespace(
+        get_current_id=lambda: None,
+        current=lambda: None,
+        id=lambda name: None,
+        all_names_and_ids=lambda: [],
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    monkeypatch.setattr(manager, "_lookup_deck_id", lambda *args: None)
+    capsys.readouterr()
+    result = manager._resolve_deck_id(collection, {"did": 77}, cfg)
+    assert result == 77
+    assert manager._missing_deck_logged is True
+    assert "Configured kanji deck" in capsys.readouterr().out
+
+
+def test_resolve_deck_id_checks_deck_helpers(manager, kanjicards_module):
+    cfg = make_config(kanjicards_module, kanji_deck_name="")
+    decks = types.SimpleNamespace(
+        get_current_id=lambda: 88,
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    assert manager._resolve_deck_id(collection, {"did": None}, cfg) == 88
+
+
+def test_resolve_deck_id_checks_current_dict(manager, kanjicards_module):
+    cfg = make_config(kanjicards_module, kanji_deck_name="")
+    decks = types.SimpleNamespace(
+        get_current_id=lambda: None,
+        current=lambda: {"id": 99},
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    assert manager._resolve_deck_id(collection, {"did": None}, cfg) == 99
+
+
+def test_resolve_deck_id_checks_named_lookup(manager, kanjicards_module):
+    cfg = make_config(kanjicards_module, kanji_deck_name="")
+    decks = types.SimpleNamespace(
+        get_current_id=lambda: None,
+        current=lambda: None,
+        id=lambda name: 111 if name == "Default" else None,
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    assert manager._resolve_deck_id(collection, {"did": None}, cfg) == 111
+
+
+def test_resolve_deck_id_scans_all_names(manager, kanjicards_module):
+    cfg = make_config(kanjicards_module, kanji_deck_name="")
+    decks = types.SimpleNamespace(
+        get_current_id=lambda: None,
+        current=lambda: None,
+        id=lambda name: (_ for _ in ()).throw(RuntimeError("unsupported")),
+        all_names_and_ids=lambda: [types.SimpleNamespace(id=222, name="Deck")],
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    assert manager._resolve_deck_id(collection, {"did": None}, cfg) == 222
+
+
+def test_resolve_deck_id_raises_when_missing(manager, kanjicards_module):
+    cfg = make_config(kanjicards_module, kanji_deck_name="")
+    decks = types.SimpleNamespace(
+        get_current_id=lambda: None,
+        current=lambda: None,
+        id=lambda name: (_ for _ in ()).throw(RuntimeError("unsupported")),
+        all_names_and_ids=lambda: [],
+    )
+    collection = types.SimpleNamespace(decks=decks)
+    with pytest.raises(RuntimeError):
+        manager._resolve_deck_id(collection, {"did": None}, cfg)

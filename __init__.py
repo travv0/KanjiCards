@@ -46,43 +46,43 @@ from aqt.qt import QApplication
 # Messaging helpers differ between Qt versions, so prefer new-style names.
 try:
     from aqt.utils import show_critical, show_info, show_warning, tooltip
-except ImportError:  # pragma: no cover
-    from aqt.utils import showCritical as show_critical  # pragma: no cover
-    from aqt.utils import showInfo as show_info  # pragma: no cover
-    from aqt.utils import showWarning as show_warning  # pragma: no cover
-    from aqt.utils import tooltip  # pragma: no cover
+except ImportError:
+    from aqt.utils import showCritical as show_critical
+    from aqt.utils import showInfo as show_info
+    from aqt.utils import showWarning as show_warning
+    from aqt.utils import tooltip
 
 try:  # PyQt6-style enums
     SINGLE_SELECTION = QAbstractItemView.SelectionMode.SingleSelection
     NO_SELECTION = QAbstractItemView.SelectionMode.NoSelection
-except AttributeError:  # pragma: no cover
-    SINGLE_SELECTION = QAbstractItemView.SingleSelection  # pragma: no cover
-    NO_SELECTION = QAbstractItemView.NoSelection  # pragma: no cover
+except AttributeError:
+    SINGLE_SELECTION = QAbstractItemView.SingleSelection
+    NO_SELECTION = QAbstractItemView.NoSelection
 
 try:
     ITEM_IS_USER_CHECKABLE = Qt.ItemFlag.ItemIsUserCheckable
     CHECKED_STATE = Qt.CheckState.Checked
     UNCHECKED_STATE = Qt.CheckState.Unchecked
     USER_ROLE = Qt.ItemDataRole.UserRole
-except AttributeError:  # pragma: no cover
-    ITEM_IS_USER_CHECKABLE = Qt.ItemIsUserCheckable  # pragma: no cover
-    CHECKED_STATE = Qt.Checked  # pragma: no cover
-    UNCHECKED_STATE = Qt.Unchecked  # pragma: no cover
-    USER_ROLE = Qt.UserRole  # pragma: no cover
+except AttributeError:
+    ITEM_IS_USER_CHECKABLE = Qt.ItemIsUserCheckable
+    CHECKED_STATE = Qt.Checked
+    UNCHECKED_STATE = Qt.Unchecked
+    USER_ROLE = Qt.UserRole
 
 try:
     DIALOG_ACCEPTED = QDialog.DialogCode.Accepted
     DIALOG_REJECTED = QDialog.DialogCode.Rejected
-except AttributeError:  # pragma: no cover
-    DIALOG_ACCEPTED = QDialog.Accepted  # pragma: no cover
-    DIALOG_REJECTED = QDialog.Rejected  # pragma: no cover
+except AttributeError:
+    DIALOG_ACCEPTED = QDialog.Accepted
+    DIALOG_REJECTED = QDialog.Rejected
 
 try:
     BUTTON_OK = QDialogButtonBox.StandardButton.Ok
     BUTTON_CANCEL = QDialogButtonBox.StandardButton.Cancel
-except AttributeError:  # pragma: no cover
-    BUTTON_OK = QDialogButtonBox.Ok  # pragma: no cover
-    BUTTON_CANCEL = QDialogButtonBox.Cancel  # pragma: no cover
+except AttributeError:
+    BUTTON_OK = QDialogButtonBox.Ok
+    BUTTON_CANCEL = QDialogButtonBox.Cancel
 
 KANJI_PATTERN = re.compile(r"[\u3400-\u9FFF\uF900-\uFAFF]")
 
@@ -140,7 +140,7 @@ class KanjiUsageInfo:
 class KanjiVocabSyncManager:
     """Core coordinator for the KanjiCards add-on."""
 
-    def __init__(self) -> None:  # pragma: no cover
+    def __init__(self) -> None:
         if not mw:
             raise RuntimeError("KanjiCards requires Anki main window")
         self.mw = mw
@@ -174,7 +174,7 @@ class KanjiVocabSyncManager:
     # ------------------------------------------------------------------
     # Configuration helpers
     # ------------------------------------------------------------------
-    def _profile_config_path(self) -> Optional[str]:  # pragma: no cover
+    def _profile_config_path(self) -> Optional[str]:
         pm = getattr(self.mw, "pm", None)
         if pm is None:
             return None
@@ -186,7 +186,7 @@ class KanjiVocabSyncManager:
             return None
         return os.path.join(folder, "kanjicards_config.json")
 
-    def _debug(self, message: str, **extra: object) -> None:  # pragma: no cover
+    def _debug(self, message: str, **extra: object) -> None:
         if not self._debug_enabled:
             return
         path = self._debug_path
@@ -207,7 +207,7 @@ class KanjiVocabSyncManager:
         except Exception:
             pass
 
-    def _load_profile_config(self) -> Dict[str, Any]:  # pragma: no cover
+    def _load_profile_config(self) -> Dict[str, Any]:
         path = self._profile_config_path()
         if not path or not os.path.exists(path):
             return {}
@@ -224,7 +224,7 @@ class KanjiVocabSyncManager:
             return data
         return {}
 
-    def _load_profile_config_or_seed(self, global_cfg: Dict[str, Any]) -> Dict[str, Any]:  # pragma: no cover
+    def _load_profile_config_or_seed(self, global_cfg: Dict[str, Any]) -> Dict[str, Any]:
         path = self._profile_config_path()
         if not path:
             return {}
@@ -234,7 +234,7 @@ class KanjiVocabSyncManager:
             self._write_profile_config(self._serialize_config(seed_cfg))
         return self._load_profile_config()
 
-    def _write_profile_config(self, data: Dict[str, Any]) -> None:  # pragma: no cover
+    def _write_profile_config(self, data: Dict[str, Any]) -> None:
         path = self._profile_config_path()
         if not path:
             return
@@ -245,7 +245,7 @@ class KanjiVocabSyncManager:
         except Exception as err:  # noqa: BLE001
             print(f"[KanjiCards] Failed to write profile config: {err}")
 
-    def _merge_config_sources(self, global_cfg: Dict[str, Any], profile_cfg: Dict[str, Any]) -> Dict[str, Any]:  # pragma: no cover
+    def _merge_config_sources(self, global_cfg: Dict[str, Any], profile_cfg: Dict[str, Any]) -> Dict[str, Any]:
         if not profile_cfg:
             return dict(global_cfg)
 
@@ -282,7 +282,7 @@ class KanjiVocabSyncManager:
             elif value is None:
                 result[key] = ""
             else:
-                result[key] = str(value).strip()  # pragma: no cover
+                result[key] = str(value).strip()
         return result
 
     def _config_from_raw(self, raw: Dict[str, Any]) -> AddonConfig:
@@ -357,14 +357,14 @@ class KanjiVocabSyncManager:
             "auto_suspend_tag": cfg.auto_suspend_tag,
         }
 
-    def load_config(self) -> AddonConfig:  # pragma: no cover
+    def load_config(self) -> AddonConfig:
         global_raw_obj = self.mw.addonManager.getConfig(__name__)
         global_raw = global_raw_obj if isinstance(global_raw_obj, dict) else {}
         profile_raw = self._load_profile_config_or_seed(global_raw)
         raw = self._merge_config_sources(global_raw, profile_raw)
         return self._config_from_raw(raw)
 
-    def save_config(self, cfg: AddonConfig) -> None:  # pragma: no cover
+    def save_config(self, cfg: AddonConfig) -> None:
         raw = self._serialize_config(cfg)
         self.mw.addonManager.writeConfig(__name__, raw)
         self._write_profile_config(raw)
@@ -381,7 +381,7 @@ class KanjiVocabSyncManager:
     # ------------------------------------------------------------------
     # UI wiring
     # ------------------------------------------------------------------
-    def _ensure_menu_actions(self) -> None:  # pragma: no cover
+    def _ensure_menu_actions(self) -> None:
         menu = self.mw.form.menuTools
         sync_action = menu.addAction("Sync Kanji Cards with Vocab")
         sync_action.triggered.connect(self.run_sync)
@@ -391,7 +391,7 @@ class KanjiVocabSyncManager:
         settings_action.triggered.connect(self.show_settings)
         self._settings_action = settings_action
 
-    def _install_hooks(self) -> None:  # pragma: no cover
+    def _install_hooks(self) -> None:
         try:
             gui_hooks.reviewer_did_answer_card.remove(self._on_reviewer_did_answer_card)
         except (ValueError, AttributeError):
@@ -404,7 +404,7 @@ class KanjiVocabSyncManager:
         gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
         self._install_sync_hook()
 
-    def _install_sync_hook(self) -> None:  # pragma: no cover
+    def _install_sync_hook(self) -> None:
         if self._sync_hook_installed:
             return
         for hook_name in ("sync_did_finish", "sync_will_start"):
@@ -420,14 +420,14 @@ class KanjiVocabSyncManager:
             self._sync_hook_target = hook_name
             break
 
-    def show_settings(self) -> None:  # pragma: no cover
+    def show_settings(self) -> None:
         dialog = KanjiVocabSyncSettingsDialog(self, self.load_config())
         dialog.exec()
 
     # ------------------------------------------------------------------
     # Sync routine
     # ------------------------------------------------------------------
-    def run_sync(self) -> None:  # pragma: no cover
+    def run_sync(self) -> None:
         self.mw.checkpoint("KanjiCards")
         progress_obj = getattr(self.mw, "progress", None)
         self.mw.progress.start(label="Preparing KanjiCards…", immediate=True)
@@ -488,17 +488,17 @@ class KanjiVocabSyncManager:
 
         try:
             QApplication.processEvents()
-        except Exception:  # pragma: no cover
+        except Exception:
             pass
 
-    def _sync_internal(self, *, progress_tracker: Optional[Dict[str, object]] = None) -> Dict[str, object]:  # pragma: no cover
+    def _sync_internal(self, *, progress_tracker: Optional[Dict[str, object]] = None) -> Dict[str, object]:
         cfg = self.load_config()
         collection = self.mw.col
         if collection is None:
             raise RuntimeError("Collection not available")
 
         if not cfg.kanji_note_type.name:
-            raise RuntimeError("Kanji note type is not configured yet")  # pragma: no cover
+            raise RuntimeError("Kanji note type is not configured yet")
 
         self._progress_step(progress_tracker, "Resolving note types…")
         kanji_model, kanji_field_indexes, kanji_field_index = self._get_kanji_model_context(collection, cfg)
@@ -558,7 +558,7 @@ class KanjiVocabSyncManager:
 
         return stats
 
-    def _on_reviewer_did_show_question(self, card: Any, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
+    def _on_reviewer_did_show_question(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
             return
         card_id = getattr(card, "id", None)
@@ -623,7 +623,7 @@ class KanjiVocabSyncManager:
             note_id=stored_note_id,
         )
 
-    def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
+    def _on_reviewer_did_answer_card(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
             return
         if self.mw.col is None:
@@ -641,7 +641,7 @@ class KanjiVocabSyncManager:
                 print(f"[KanjiCards] realtime sync error: {err}")
                 self._realtime_error_logged = True
 
-    def _process_reviewed_card(self, card: Any) -> None:  # pragma: no cover
+    def _process_reviewed_card(self, card: Any) -> None:
         collection = self.mw.col
         if collection is None:
             return
@@ -840,7 +840,7 @@ class KanjiVocabSyncManager:
 
         self._realtime_error_logged = False
 
-    def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:  # pragma: no cover
+    def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
         if self._suppress_next_auto_sync:
             self._suppress_next_auto_sync = False
             return
@@ -871,7 +871,7 @@ class KanjiVocabSyncManager:
         except Exception:
             trigger()
 
-    def _stats_warrant_sync(self, stats: Dict[str, object]) -> bool:  # pragma: no cover
+    def _stats_warrant_sync(self, stats: Dict[str, object]) -> bool:
         for key in (
             "created",
             "existing_tagged",
@@ -890,7 +890,7 @@ class KanjiVocabSyncManager:
                 continue
         return False
 
-    def _trigger_followup_sync(self) -> bool:  # pragma: no cover
+    def _trigger_followup_sync(self) -> bool:
         methods = [
             "on_sync_button_clicked",
             "onSyncButton",
@@ -1039,7 +1039,7 @@ class KanjiVocabSyncManager:
         else:
             try:
                 data = self._load_dictionary_kanjidic(path)
-            except Exception:  # pragma: no cover
+            except Exception:
                 data = self._load_dictionary_json(path)
 
         self._dictionary_cache = {"path": path, "mtime": mtime, "data": data}
@@ -1068,7 +1068,7 @@ class KanjiVocabSyncManager:
         except ET.ParseError as err:
             raise RuntimeError(
                 "Dictionary XML could not be parsed; ensure it is a valid KANJIDIC2 file"
-            ) from err  # pragma: no cover
+            ) from err
         root = tree.getroot()
         if root is None or root.tag != "kanjidic2":
             raise RuntimeError("Dictionary XML does not appear to be a KANJIDIC2 file")
@@ -1136,7 +1136,7 @@ class KanjiVocabSyncManager:
             raise RuntimeError("No kanji entries were parsed from the dictionary XML")
         return dictionary
 
-    def _collect_vocab_usage(  # pragma: no cover
+    def _collect_vocab_usage(
         self,
         collection: Collection,
         vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
@@ -1926,7 +1926,7 @@ class KanjiVocabSyncManager:
             )
         return {nid: bool(flag) for nid, flag in rows}
 
-    def _update_vocab_suspension(  # pragma: no cover
+    def _update_vocab_suspension(
         self,
         collection: Collection,
         cfg: AddonConfig,
@@ -2028,7 +2028,7 @@ class KanjiVocabSyncManager:
 
         return stats
 
-    def _create_kanji_note(  # pragma: no cover
+    def _create_kanji_note(
         self,
         collection: Collection,
         kanji_model: NotetypeDict,
@@ -2070,12 +2070,12 @@ class KanjiVocabSyncManager:
             return None
         return getattr(note, "id", None)
 
-    def _assign_field(self, note: Note, field_name: Optional[str], value: str) -> None:  # pragma: no cover
+    def _assign_field(self, note: Note, field_name: Optional[str], value: str) -> None:
         if not field_name:
             return
         note[field_name] = value or ""
 
-    def _format_frequency_value(self, value: object) -> str:  # pragma: no cover
+    def _format_frequency_value(self, value: object) -> str:
         if value is None:
             return ""
         if isinstance(value, int):
@@ -2086,7 +2086,7 @@ class KanjiVocabSyncManager:
             return value.strip()
         return str(value)
 
-    def _update_frequency_field(  # pragma: no cover
+    def _update_frequency_field(
         self,
         note: Note,
         field_name: Optional[str],
@@ -2104,12 +2104,12 @@ class KanjiVocabSyncManager:
         note[field_name] = new_value
         return True
 
-    def _format_readings(self, value: object) -> str:  # pragma: no cover
+    def _format_readings(self, value: object) -> str:
         if isinstance(value, list):
             return "; ".join(str(item) for item in value if item)
         return str(value or "")
 
-    def _unsuspend_note_cards_if_needed(  # pragma: no cover
+    def _unsuspend_note_cards_if_needed(
         self,
         collection: Collection,
         note: Note,
@@ -2148,7 +2148,7 @@ class KanjiVocabSyncManager:
             note.flush()
         return len(to_unsuspend)
 
-    def _resolve_deck_id(self, collection: Collection, model: NotetypeDict, cfg: AddonConfig) -> int:  # pragma: no cover
+    def _resolve_deck_id(self, collection: Collection, model: NotetypeDict, cfg: AddonConfig) -> int:
         if cfg.kanji_deck_name:
             deck_id = self._lookup_deck_id(collection, cfg.kanji_deck_name)
             if deck_id:
@@ -2206,7 +2206,7 @@ class KanjiVocabSyncManager:
 
         raise RuntimeError("Unable to determine a deck for new kanji notes")
 
-    def _lookup_deck_id(self, collection: Collection, name: str) -> Optional[int]:  # pragma: no cover
+    def _lookup_deck_id(self, collection: Collection, name: str) -> Optional[int]:
         decks = collection.decks
         if not name:
             return None
@@ -2236,7 +2236,7 @@ class KanjiVocabSyncManager:
                         return entry_id
         return None
 
-    def _deck_entry_name(self, entry: Any) -> Optional[str]:  # pragma: no cover
+    def _deck_entry_name(self, entry: Any) -> Optional[str]:
         if entry is None:
             return None
         if hasattr(entry, "name"):
@@ -2684,7 +2684,7 @@ gui_hooks.main_window_did_init.append(on_main_window_did_init)
 # ----------------------------------------------------------------------
 # Backwards compatibility helpers
 # ----------------------------------------------------------------------
-def _add_note(collection: Collection, note: Note, deck_id: Optional[int] = None) -> bool:  # pragma: no cover
+def _add_note(collection: Collection, note: Note, deck_id: Optional[int] = None) -> bool:
     handler = getattr(collection, "add_note", None)
     if callable(handler):
         try:
@@ -2701,7 +2701,7 @@ def _add_note(collection: Collection, note: Note, deck_id: Optional[int] = None)
     return collection.addNote(note)
 
 
-def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> None:  # pragma: no cover
+def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> None:
     if not card_ids:
         return
     sched = getattr(collection, "sched", None)
@@ -2722,7 +2722,7 @@ def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> None:  
     )
 
 
-def _resuspend_note_cards(collection: Collection, note: Note) -> int:  # pragma: no cover
+def _resuspend_note_cards(collection: Collection, note: Note) -> int:
     card_rows = _db_all(
         collection,
         "SELECT id, queue FROM cards WHERE nid = ?",
@@ -2752,7 +2752,7 @@ def _resuspend_note_cards(collection: Collection, note: Note) -> int:  # pragma:
     return len(to_suspend)
 
 
-def _db_all(  # pragma: no cover
+def _db_all(
     collection: Collection,
     sql: str,
     *params: object,
@@ -2765,7 +2765,7 @@ def _db_all(  # pragma: no cover
         raise
 
 
-def _db_execute(  # pragma: no cover
+def _db_execute(
     collection: Collection,
     sql: str,
     *params: object,
@@ -2778,7 +2778,7 @@ def _db_execute(  # pragma: no cover
         raise
 
 
-def _log_db_error(  # pragma: no cover
+def _log_db_error(
     operation: str,
     sql: str,
     params: Sequence[object],
@@ -2802,14 +2802,14 @@ def _chunk_sequence(values: Sequence[int], chunk_size: int) -> Iterator[List[int
         yield list(values[start : start + chunk_size])
 
 
-def _new_note(collection: Collection, model: NotetypeDict) -> Note:  # pragma: no cover
+def _new_note(collection: Collection, model: NotetypeDict) -> Note:
     handler = getattr(collection, "new_note", None)
     if callable(handler):
         return handler(model)
     return collection.newNote(model)
 
 
-def _get_note(collection: Collection, note_id: int) -> Note:  # pragma: no cover
+def _get_note(collection: Collection, note_id: int) -> Note:
     handler = getattr(collection, "get_note", None)
     if callable(handler):
         return handler(note_id)
