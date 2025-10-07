@@ -547,6 +547,16 @@ class KanjiVocabSyncManager:
 
         vocab_field_map = {model["id"]: indexes for model, indexes in vocab_map.values()}
 
+        print(
+            "[KanjiCards] realtime trigger",
+            {
+                "chars": "".join(sorted(kanji_chars)),
+                "card_id": card_id,
+                "note_id": getattr(note, "id", None),
+                "was_new": was_new,
+            },
+        )
+
         existing_notes = self._get_existing_kanji_notes(collection, kanji_model, kanji_field_index)
         if not existing_notes:
             return
@@ -1591,6 +1601,15 @@ class KanjiVocabSyncManager:
             for char in force_chars_reviewed:
                 if char:
                     kanji_reviewed[char] = True
+        if force_chars_reviewed:
+            print(
+                "[KanjiCards] realtime status",
+                {
+                    "target": "".join(sorted(force_chars_reviewed)),
+                    "notes": len(notes_info),
+                    "has_tag": tag,
+                },
+            )
         card_map = self._load_card_status_for_notes(collection, notes_info.keys())
 
         for note_id, (chars, tag_set) in notes_info.items():
@@ -1600,6 +1619,14 @@ class KanjiVocabSyncManager:
             cards = card_map.get(note_id, [])
             if cfg.auto_suspend_vocab:
                 if requires_suspend:
+                    print(
+                        "[KanjiCards] realtime keep suspended",
+                        {
+                            "note": note_id,
+                            "chars": "".join(sorted(chars)),
+                            "requires_suspend": True,
+                        },
+                    )
                     unsuspended_cards = [card_id for card_id, queue in cards if queue != -1]
                     if not unsuspended_cards:
                         continue
@@ -1620,6 +1647,14 @@ class KanjiVocabSyncManager:
                 note = _get_note(collection, note_id)
                 changed = False
                 if suspended_cards:
+                    print(
+                        "[KanjiCards] realtime unsuspend",
+                        {
+                            "note": note_id,
+                            "chars": "".join(sorted(chars)),
+                            "count": len(suspended_cards),
+                        },
+                    )
                     _unsuspend_cards(collection, suspended_cards)
                     stats["vocab_unsuspended"] += len(suspended_cards)
                     changed = True
