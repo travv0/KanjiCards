@@ -41,6 +41,7 @@ from aqt.qt import (
     QWidget,
     QVBoxLayout,
 )
+from aqt.qt import QApplication
 
 # Messaging helpers differ between Qt versions, so prefer new-style names.
 try:
@@ -461,15 +462,31 @@ class KanjiVocabSyncManager:
         max_value = tracker.get("max")
         kwargs: Dict[str, object] = {"label": label}
         if isinstance(max_value, int):
-            kwargs["value"] = current
+            kwargs["value"] = max(min(current, max_value), 0)
             kwargs["max"] = max_value
-        try:
-            update(**kwargs)
-        except TypeError:
+
+        def _do_update() -> None:
             try:
-                update(label)
+                update(**kwargs)
             except TypeError:
-                pass
+                try:
+                    update(label)
+                except TypeError:
+                    pass
+
+        taskman = getattr(self.mw, "taskman", None)
+        if taskman and hasattr(taskman, "run_on_main"):
+            try:
+                taskman.run_on_main(_do_update)
+            except Exception:
+                _do_update()
+        else:
+            _do_update()
+
+        try:
+            QApplication.processEvents()
+        except Exception:
+            pass
 
     def _sync_internal(self, *, progress_tracker: Optional[Dict[str, object]] = None) -> Dict[str, object]:
         cfg = self.load_config()
