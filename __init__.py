@@ -168,6 +168,7 @@ class KanjiVocabSyncManager:
         self._install_hooks()
         self._install_sync_hook()
         self.mw.addonManager.setConfigAction(__name__, self.show_settings)
+        self._suppress_next_auto_sync = False
 
     # ------------------------------------------------------------------
     # Configuration helpers
@@ -839,6 +840,9 @@ class KanjiVocabSyncManager:
         self._realtime_error_logged = False
 
     def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
+        if self._suppress_next_auto_sync:
+            self._suppress_next_auto_sync = False
+            return
         cfg = self.load_config()
         if not cfg.auto_run_on_sync:
             return
@@ -855,7 +859,11 @@ class KanjiVocabSyncManager:
             self._realtime_error_logged = False
             stats = self.run_sync()
             if stats and self._stats_warrant_sync(stats):
-                QTimer.singleShot(200, self._trigger_followup_sync)
+                def followup() -> None:
+                    if self._trigger_followup_sync():
+                        self._suppress_next_auto_sync = True
+
+                QTimer.singleShot(200, followup)
 
         try:
             self.mw.taskman.run_on_main(trigger)
@@ -881,7 +889,7 @@ class KanjiVocabSyncManager:
                 continue
         return False
 
-    def _trigger_followup_sync(self) -> None:
+    def _trigger_followup_sync(self) -> bool:
         methods = [
             "on_sync_button_clicked",
             "onSyncButton",
@@ -892,14 +900,16 @@ class KanjiVocabSyncManager:
             handler = getattr(self.mw, name, None)
             if callable(handler):
                 handler()
-                return
+                return True
         toolbar = getattr(self.mw, "form", None)
         sync_button = getattr(toolbar, "syncButton", None)
         if sync_button is not None:
             try:
                 sync_button.animateClick()
+                return True
             except Exception:
-                pass
+                return False
+        return False
 
     # ------------------------------------------------------------------
     # Helpers
