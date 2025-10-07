@@ -192,6 +192,16 @@ class KanjiVocabSyncManager:
             return data
         return {}
 
+    def _load_profile_config_or_seed(self, global_cfg: Dict[str, Any]) -> Dict[str, Any]:
+        path = self._profile_config_path()
+        if not path:
+            return {}
+        if not os.path.exists(path):
+            base_raw = global_cfg if isinstance(global_cfg, dict) else {}
+            seed_cfg = self._config_from_raw(base_raw)
+            self._write_profile_config(self._serialize_config(seed_cfg))
+        return self._load_profile_config()
+
     def _write_profile_config(self, data: Dict[str, Any]) -> None:
         path = self._profile_config_path()
         if not path:
@@ -243,21 +253,33 @@ class KanjiVocabSyncManager:
                 result[key] = str(value).strip()
         return result
 
-    def load_config(self) -> AddonConfig:
-        global_raw = self.mw.addonManager.getConfig(__name__) or {}
-        profile_raw = self._load_profile_config()
-        raw = self._merge_config_sources(global_raw, profile_raw)
-        vocab_cfg = [
-            VocabNoteTypeConfig(name=item.get("note_type", ""), fields=item.get("fields", []) or [])
-            for item in raw.get("vocab_note_types", [])
-        ]
+    def _config_from_raw(self, raw: Dict[str, Any]) -> AddonConfig:
+        vocab_entries = raw.get("vocab_note_types", [])
+        vocab_cfg: List[VocabNoteTypeConfig] = []
+        if isinstance(vocab_entries, list):
+            for item in vocab_entries:
+                if not isinstance(item, dict):
+                    continue
+                fields_raw = item.get("fields", []) or []
+                fields = [field for field in fields_raw if isinstance(field, str)]
+                vocab_cfg.append(
+                    VocabNoteTypeConfig(
+                        name=item.get("note_type", ""),
+                        fields=fields,
+                    )
+                )
+
         kanji_cfg_raw = raw.get("kanji_note_type", {})
+        if not isinstance(kanji_cfg_raw, dict):
+            kanji_cfg_raw = {}
         kanji_fields = self._normalize_kanji_fields(kanji_cfg_raw.get("fields"))
         kanji_cfg = KanjiNoteTypeConfig(
             name=kanji_cfg_raw.get("name", ""),
             fields=kanji_fields,
         )
+
         bucket_tags = self._normalize_bucket_tags(raw.get("bucket_tags"))
+
         return AddonConfig(
             vocab_note_types=vocab_cfg,
             kanji_note_type=kanji_cfg,
@@ -268,28 +290,28 @@ class KanjiVocabSyncManager:
             no_vocab_tag=raw.get("no_vocab_tag", ""),
             dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
             kanji_deck_name=raw.get("kanji_deck_name", ""),
-            auto_run_on_sync=raw.get("auto_run_on_sync", False),
-            realtime_review=raw.get("realtime_review", True),
+            auto_run_on_sync=bool(raw.get("auto_run_on_sync", False)),
+            realtime_review=bool(raw.get("realtime_review", True)),
             unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
             reorder_mode=raw.get("reorder_mode", "vocab"),
-            ignore_suspended_vocab=raw.get("ignore_suspended_vocab", False),
-            auto_suspend_vocab=raw.get("auto_suspend_vocab", False),
+            ignore_suspended_vocab=bool(raw.get("ignore_suspended_vocab", False)),
+            auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
             auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_unreviewed"),
         )
 
-    def save_config(self, cfg: AddonConfig) -> None:
-        raw = {
+    def _serialize_config(self, cfg: AddonConfig) -> Dict[str, Any]:
+        return {
             "vocab_note_types": [
-                {"note_type": item.name, "fields": item.fields}
+                {"note_type": item.name, "fields": list(item.fields)}
                 for item in cfg.vocab_note_types
             ],
             "kanji_note_type": {
                 "name": cfg.kanji_note_type.name,
-                "fields": cfg.kanji_note_type.fields,
+                "fields": dict(cfg.kanji_note_type.fields),
             },
             "existing_tag": cfg.existing_tag,
             "created_tag": cfg.created_tag,
-            "bucket_tags": cfg.bucket_tags,
+            "bucket_tags": dict(cfg.bucket_tags),
             "only_new_vocab_tag": cfg.only_new_vocab_tag,
             "no_vocab_tag": cfg.no_vocab_tag,
             "dictionary_file": cfg.dictionary_file,
@@ -302,6 +324,16 @@ class KanjiVocabSyncManager:
             "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
             "auto_suspend_tag": cfg.auto_suspend_tag,
         }
+
+    def load_config(self) -> AddonConfig:
+        global_raw_obj = self.mw.addonManager.getConfig(__name__)
+        global_raw = global_raw_obj if isinstance(global_raw_obj, dict) else {}
+        profile_raw = self._load_profile_config_or_seed(global_raw)
+        raw = self._merge_config_sources(global_raw, profile_raw)
+        return self._config_from_raw(raw)
+
+    def save_config(self, cfg: AddonConfig) -> None:
+        raw = self._serialize_config(cfg)
         self.mw.addonManager.writeConfig(__name__, raw)
         self._write_profile_config(raw)
         self._dictionary_cache = None
