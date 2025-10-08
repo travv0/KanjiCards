@@ -161,6 +161,28 @@ def _make_qt_module() -> types.ModuleType:
                 self._index = index
                 self.currentIndexChanged.emit(index)
 
+    class QSpinBox:
+        def __init__(self, *args, **kwargs) -> None:
+            self._value = 0
+            self._minimum = 0
+            self._maximum = 0
+
+        def setRange(self, minimum: int, maximum: int) -> None:
+            self._minimum = minimum
+            self._maximum = maximum
+
+        def setValue(self, value: int) -> None:
+            self._value = value
+
+        def value(self) -> int:
+            return self._value
+
+        def setSingleStep(self, _step: int) -> None:
+            return None
+
+        def setSuffix(self, _suffix: str) -> None:
+            return None
+
     class QTimer:
         @staticmethod
         def singleShot(*args, **kwargs) -> None:
@@ -179,6 +201,7 @@ def _make_qt_module() -> types.ModuleType:
     qt_mod.QListWidget = QListWidget
     qt_mod.QListWidgetItem = QListWidgetItem
     qt_mod.QPushButton = _widget_factory("QPushButton")
+    qt_mod.QSpinBox = QSpinBox
     qt_mod.QTabWidget = _widget_factory("QTabWidget")
     qt_mod.Qt = Qt
     qt_mod.QTimer = QTimer

@@ -65,6 +65,7 @@ def make_config(kanjicards_module, **overrides):
         "unsuspended_tag": "",
         "reorder_mode": "vocab",
         "ignore_suspended_vocab": False,
+        "known_kanji_interval": 21,
         "auto_suspend_vocab": False,
         "auto_suspend_tag": "",
     }

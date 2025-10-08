@@ -37,6 +37,7 @@ from aqt.qt import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QSpinBox,
     QTabWidget,
     Qt,
     QTimer,
@@ -157,6 +158,7 @@ class AddonConfig:
     unsuspended_tag: str
     reorder_mode: str
     ignore_suspended_vocab: bool
+    known_kanji_interval: int
     auto_suspend_vocab: bool
     auto_suspend_tag: str
 
@@ -346,6 +348,14 @@ class KanjiVocabSyncManager:
 
         bucket_tags = self._normalize_bucket_tags(raw.get("bucket_tags"))
 
+        interval_raw = raw.get("known_kanji_interval", 21)
+        try:
+            interval_value = int(interval_raw)
+        except Exception:
+            interval_value = 21
+        if interval_value < 0:
+            interval_value = 0
+
         return AddonConfig(
             vocab_note_types=vocab_cfg,
             kanji_note_type=kanji_cfg,
@@ -361,6 +371,7 @@ class KanjiVocabSyncManager:
             unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
             reorder_mode=raw.get("reorder_mode", "vocab"),
             ignore_suspended_vocab=bool(raw.get("ignore_suspended_vocab", False)),
+            known_kanji_interval=interval_value,
             auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
             auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_unreviewed"),
         )
@@ -387,6 +398,7 @@ class KanjiVocabSyncManager:
             "unsuspended_tag": cfg.unsuspended_tag,
             "reorder_mode": cfg.reorder_mode,
             "ignore_suspended_vocab": bool(cfg.ignore_suspended_vocab),
+            "known_kanji_interval": int(cfg.known_kanji_interval),
             "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
             "auto_suspend_tag": cfg.auto_suspend_tag,
         }
@@ -1837,24 +1849,45 @@ class KanjiVocabSyncManager:
         self,
         collection: Collection,
         existing_notes: Dict[str, int],
+        min_interval: int,
     ) -> Dict[str, bool]:
         if not existing_notes:
             return {}
         note_ids = list(dict.fromkeys(existing_notes.values()))
         if not note_ids:
             return {}
-        rows: List[Tuple[int, int]] = []
+        try:
+            threshold = int(min_interval)
+        except Exception:
+            threshold = 0
+        if threshold < 0:
+            threshold = 0
+        rows: List[Tuple[int, int, int]] = []
         for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
             placeholders = ",".join("?" for _ in batch_ids)
             rows.extend(
                 _db_all(
                     collection,
-                    f"SELECT nid, MAX(CASE WHEN type != 0 THEN 1 ELSE 0 END) FROM cards WHERE nid IN ({placeholders}) GROUP BY nid",
+                    (
+                        "SELECT nid, "
+                        "MAX(CASE WHEN type != 0 THEN 1 ELSE 0 END) AS reviewed_flag, "
+                        "MAX(CASE WHEN type != 0 THEN ivl ELSE 0 END) AS max_interval "
+                        f"FROM cards WHERE nid IN ({placeholders}) GROUP BY nid"
+                    ),
                     *batch_ids,
                     context=f"compute_kanji_reviewed_flags/batch{batch_index}",
                 )
             )
-        status_by_note: Dict[int, bool] = {nid: bool(flag) for nid, flag in rows}
+        status_by_note: Dict[int, bool] = {}
+        for nid, reviewed_flag, max_interval in rows:
+            reviewed = bool(reviewed_flag)
+            if reviewed and threshold > 0:
+                try:
+                    interval_value = int(max_interval)
+                except Exception:
+                    interval_value = 0
+                reviewed = interval_value >= threshold
+            status_by_note[nid] = reviewed
         return {char: status_by_note.get(note_id, False) for char, note_id in existing_notes.items()}
 
     def _fetch_vocab_rows(
@@ -1985,7 +2018,11 @@ class KanjiVocabSyncManager:
             self._debug("realtime/update_empty", target=target_display)
             return stats
         tag_lower = tag.lower()
-        kanji_reviewed = self._compute_kanji_reviewed_flags(collection, existing_notes)
+        kanji_reviewed = self._compute_kanji_reviewed_flags(
+            collection,
+            existing_notes,
+            cfg.known_kanji_interval,
+        )
         if force_chars_reviewed:
             for char in force_chars_reviewed:
                 if char:
@@ -2323,6 +2360,13 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         self._populate_deck_combo()
         self.realtime_check = QCheckBox("Update during reviews")
         self.realtime_check.setChecked(self.config.realtime_review)
+        self.known_interval_spin = QSpinBox()
+        self.known_interval_spin.setRange(0, 3650)
+        try:
+            interval_value = int(self.config.known_kanji_interval)
+        except Exception:
+            interval_value = 0
+        self.known_interval_spin.setValue(max(0, interval_value))
         self.auto_sync_check = QCheckBox("Run automatically after sync")
         self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
         self.ignore_suspended_check = QCheckBox("Ignore suspended vocab cards")
@@ -2356,6 +2400,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         form.addRow("Unsuspended tag", self.unsuspend_tag_edit)
         form.addRow("Kanji deck", self.deck_combo)
         form.addRow("", self.realtime_check)
+        form.addRow("Known kanji interval (days)", self.known_interval_spin)
         form.addRow("", self.auto_sync_check)
         form.addRow("", self.ignore_suspended_check)
         form.addRow("", self.auto_suspend_check)
@@ -2525,6 +2570,11 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         self.config.kanji_deck_name = deck_name.strip() if isinstance(deck_name, str) else ""
         self.config.unsuspended_tag = self.unsuspend_tag_edit.text().strip()
         self.config.realtime_review = self.realtime_check.isChecked()
+        try:
+            known_interval = int(self.known_interval_spin.value())
+        except Exception:
+            known_interval = 0
+        self.config.known_kanji_interval = max(0, known_interval)
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
         self.config.ignore_suspended_vocab = self.ignore_suspended_check.isChecked()
         auto_suspend_enabled = self.auto_suspend_check.isChecked()

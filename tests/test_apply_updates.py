@@ -162,6 +162,7 @@ def make_config(kanjicards_module, **overrides):
         "unsuspended_tag": "unsuspend",
         "reorder_mode": "vocab",
         "ignore_suspended_vocab": False,
+        "known_kanji_interval": 21,
         "auto_suspend_vocab": False,
         "auto_suspend_tag": "",
     }
@@ -425,15 +426,27 @@ def test_compute_kanji_reviewed_flags(manager, kanjicards_module, monkeypatch):
 
     def fake_db_all(collection, sql, *params, context=""):
         calls.append(context)
-        return [(1, 1), (3, 0)]
+        return [(1, 1, 25), (2, 1, 10), (3, 0, 0)]
 
     monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
 
     existing = {"火": 1, "水": 2, "風": 3}
-    result = manager._compute_kanji_reviewed_flags(types.SimpleNamespace(), existing)
+    result = manager._compute_kanji_reviewed_flags(types.SimpleNamespace(), existing, 21)
 
     assert result == {"火": True, "水": False, "風": False}
     assert calls and calls[0].startswith("compute_kanji_reviewed_flags")
+
+
+def test_compute_kanji_reviewed_flags_zero_threshold(manager, kanjicards_module, monkeypatch):
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_db_all",
+        lambda *args, **kwargs: [(1, 1, 5)],
+    )
+
+    result = manager._compute_kanji_reviewed_flags(types.SimpleNamespace(), {"火": 1}, 0)
+
+    assert result == {"火": True}
 
 
 def test_collect_vocab_note_chars_filters(manager, monkeypatch):
