@@ -7,9 +7,11 @@ automatically using dictionary data and tagged accordingly.
 """
 from __future__ import annotations
 
+import builtins
 import json
 import os
 import re
+import sys
 import time
 from collections import defaultdict
 import xml.etree.ElementTree as ET
@@ -93,6 +95,38 @@ BUCKET_TAG_KEYS: Tuple[str, str, str] = (
     "unreviewed_vocab",
     "no_vocab",
 )
+
+
+def _safe_print(*args: object, **kwargs: Any) -> None:
+    try:
+        builtins.print(*args, **kwargs)
+        return
+    except (BlockingIOError, OSError):
+        pass
+    except Exception:
+        return
+
+    try:
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        stream = kwargs.get("file")
+    except Exception:
+        sep = " "
+        end = "\n"
+        stream = None
+
+    try:
+        message = sep.join(str(arg) for arg in args)
+    except Exception:
+        return
+
+    fallback_stream = stream or getattr(sys, "__stderr__", None) or getattr(sys, "__stdout__", None)
+    if fallback_stream is None:
+        return
+    try:
+        fallback_stream.write(message + end)
+    except Exception:
+        pass
 
 
 @dataclass
@@ -216,7 +250,7 @@ class KanjiVocabSyncManager:
                 data = json.load(handle)
         except Exception as err:  # noqa: BLE001
             if not self._profile_config_error_logged:
-                print(f"[KanjiCards] Failed to load profile config: {err}")
+                _safe_print(f"[KanjiCards] Failed to load profile config: {err}")
                 self._profile_config_error_logged = True
             return {}
         self._profile_config_error_logged = False
@@ -243,7 +277,7 @@ class KanjiVocabSyncManager:
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2, ensure_ascii=False)
         except Exception as err:  # noqa: BLE001
-            print(f"[KanjiCards] Failed to write profile config: {err}")
+            _safe_print(f"[KanjiCards] Failed to write profile config: {err}")
 
     def _merge_config_sources(self, global_cfg: Dict[str, Any], profile_cfg: Dict[str, Any]) -> Dict[str, Any]:
         if not profile_cfg:
@@ -638,7 +672,7 @@ class KanjiVocabSyncManager:
             self._process_reviewed_card(card)
         except Exception as err:  # noqa: BLE001
             if not self._realtime_error_logged:
-                print(f"[KanjiCards] realtime sync error: {err}")
+                _safe_print(f"[KanjiCards] realtime sync error: {err}")
                 self._realtime_error_logged = True
 
     def _process_reviewed_card(self, card: Any) -> None:
@@ -2155,7 +2189,7 @@ class KanjiVocabSyncManager:
                 self._missing_deck_logged = False
                 return deck_id
             if not self._missing_deck_logged:
-                print(
+                _safe_print(
                     "[KanjiCards] Configured kanji deck '%s' was not found; using fallback"
                     % cfg.kanji_deck_name
                 )
@@ -2788,10 +2822,10 @@ def _log_db_error(
     prefix = "[KanjiCards] db.%s failed" % operation
     if context:
         prefix += f" ({context})"
-    print(prefix + f": {err}")
-    print(f"  SQL: {sql}")
+    _safe_print(prefix + f": {err}")
+    _safe_print(f"  SQL: {sql}")
     if params:
-        print(f"  Params: {params}")
+        _safe_print(f"  Params: {params}")
 
 
 def _chunk_sequence(values: Sequence[int], chunk_size: int) -> Iterator[List[int]]:
