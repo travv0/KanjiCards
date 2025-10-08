@@ -1,7 +1,11 @@
 import importlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import os
 import sys
 import types
+from pathlib import Path
 from typing import Any, Dict
 
 import pytest
@@ -278,6 +282,21 @@ def _install_stubs() -> None:
     sys.modules["aqt.utils"] = utils_module
     sys.modules["aqt.qt"] = qt_mod
 
+    class _AddonFinder(importlib.abc.MetaPathFinder):
+        def __init__(self, module_name: str, module_path: Path) -> None:
+            self._module_name = module_name
+            self._module_path = module_path
+
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname != self._module_name:
+                return None
+            loader = importlib.machinery.SourceFileLoader(fullname, str(self._module_path))
+            return importlib.util.spec_from_loader(fullname, loader)
+
+    addon_path = Path(__file__).resolve().parent.parent / "__init__.py"
+    finder = _AddonFinder("KanjiCards", addon_path)
+    if not any(isinstance(existing, _AddonFinder) for existing in sys.meta_path):
+        sys.meta_path.insert(0, finder)
 
 _install_stubs()
 
@@ -290,7 +309,17 @@ def stub_anki_env() -> None:
 
 @pytest.fixture(scope="session")
 def kanjicards_module(stub_anki_env):
-    return importlib.import_module("KanjiCards")
+    try:
+        return importlib.import_module("KanjiCards")
+    except ModuleNotFoundError:
+        module_path = Path(__file__).resolve().parent.parent / "__init__.py"
+        spec = importlib.util.spec_from_file_location("KanjiCards", module_path)
+        if spec is None or spec.loader is None:
+            raise
+        module = importlib.util.module_from_spec(spec)
+        sys.modules.setdefault("KanjiCards", module)
+        spec.loader.exec_module(module)
+        return module
 
 
 @pytest.fixture

@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+anki = pytest.importorskip("anki", reason="Requires Anki installed for headless integration tests.")
+aqt = pytest.importorskip("aqt", reason="Requires aqt installed for headless integration tests.")
+
 
 @pytest.fixture(scope="module")
 def real_env(tmp_path_factory):
@@ -17,8 +20,11 @@ def real_env(tmp_path_factory):
             if name == prefix or name.startswith(prefix + "."):
                 sys.modules.pop(name)
 
-    anki = importlib.import_module("anki")
-    aqt = importlib.import_module("aqt")
+    try:
+        anki = importlib.import_module("anki")
+        aqt = importlib.import_module("aqt")
+    except ModuleNotFoundError:
+        pytest.skip("Anki runtime not available for headless integration tests.")
     from anki.collection import Collection
 
     tmp_dir = tmp_path_factory.mktemp("anki_headless")

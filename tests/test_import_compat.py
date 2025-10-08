@@ -70,6 +70,7 @@ def test_import_fallbacks(monkeypatch):
         "QListWidget",
         "QListWidgetItem",
         "QPushButton",
+        "QSpinBox",
         "QTabWidget",
         "QTimer",
         "QWidget",
