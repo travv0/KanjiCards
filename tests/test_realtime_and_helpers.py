@@ -57,6 +57,10 @@ def manager(kanjicards_module):
     manager._dictionary_cache = None
     manager._vocab_model_cache = None
     manager._realtime_error_logged = False
+    manager._last_vocab_sync_mod = None
+    manager._last_vocab_sync_count = None
+    manager._pending_vocab_sync_marker = None
+    manager._suppress_next_auto_sync = False
     return manager
 
 

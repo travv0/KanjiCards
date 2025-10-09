@@ -46,6 +46,10 @@ def manager(kanjicards_module):
     manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
     manager.mw = types.SimpleNamespace()
     manager._missing_deck_logged = False
+    manager._last_vocab_sync_mod = None
+    manager._last_vocab_sync_count = None
+    manager._pending_vocab_sync_marker = None
+    manager._suppress_next_auto_sync = False
     return manager
 
 
@@ -78,6 +82,30 @@ def test_chunk_sequence_splits_and_validates(kanjicards_module):
     assert chunks == [[1, 2], [3, 4], [5]]
     with pytest.raises(ValueError):
         list(kanjicards_module._chunk_sequence([1], 0))
+
+
+def test_have_vocab_notes_changed_initial_run(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(kanjicards_module)
+    monkeypatch.setattr(manager, "_resolve_vocab_models", lambda *args, **kwargs: [])
+    assert manager._have_vocab_notes_changed(types.SimpleNamespace(), cfg) is True
+
+
+def test_have_vocab_notes_changed_no_change(manager, kanjicards_module, monkeypatch):
+    manager._last_vocab_sync_mod = 100
+    manager._last_vocab_sync_count = 5
+    cfg = make_config(kanjicards_module)
+    monkeypatch.setattr(manager, "_resolve_vocab_models", lambda *args, **kwargs: [({}, [])])
+    monkeypatch.setattr(manager, "_compute_vocab_sync_marker", lambda *args, **kwargs: (5, 100))
+    assert manager._have_vocab_notes_changed(types.SimpleNamespace(), cfg) is False
+
+
+def test_have_vocab_notes_changed_detects_change(manager, kanjicards_module, monkeypatch):
+    manager._last_vocab_sync_mod = 100
+    manager._last_vocab_sync_count = 5
+    cfg = make_config(kanjicards_module)
+    monkeypatch.setattr(manager, "_resolve_vocab_models", lambda *args, **kwargs: [({}, [])])
+    monkeypatch.setattr(manager, "_compute_vocab_sync_marker", lambda *args, **kwargs: (6, 120))
+    assert manager._have_vocab_notes_changed(types.SimpleNamespace(), cfg) is True
 
 
 def test_remove_tag_case_insensitive(kanjicards_module):

@@ -187,6 +187,13 @@ def test_run_sync_success_and_failure(manager_with_profile, kanjicards_module, m
     stats_called = {}
     monkeypatch.setattr(manager_with_profile, "_notify_summary", lambda stats: stats_called.setdefault("stats", stats))
     manager_with_profile._sync_internal = lambda **kwargs: {"created": 1}  # type: ignore[assignment]
+    cfg = manager_with_profile._config_from_raw(
+        {
+            "kanji_note_type": {"name": "Kanji", "fields": {}},
+            "vocab_note_types": [],
+        }
+    )
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
 
     result = manager_with_profile.run_sync()
     assert result["created"] == 1
@@ -216,6 +223,7 @@ def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicard
     manager_with_profile._stats_warrant_sync = lambda stats: True  # type: ignore[assignment]
     manager_with_profile.run_sync = lambda: {"created": 1}  # type: ignore[assignment]
     manager_with_profile._trigger_followup_sync = lambda: True  # type: ignore[assignment]
+    manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: True  # type: ignore[assignment]
     mw.col = object()
     mw.progress.busy_values = [True, False]
 
@@ -237,3 +245,26 @@ def test_on_sync_event_respects_suppression(manager_with_profile):
     manager_with_profile._suppress_next_auto_sync = True
     manager_with_profile._on_sync_event()
     assert manager_with_profile._suppress_next_auto_sync is False
+
+
+def test_on_sync_event_skips_when_no_vocab_changes(manager_with_profile, tmp_path):
+    mw = FakeMainWindow(tmp_path)
+    manager_with_profile.mw = mw
+    cfg = manager_with_profile._config_from_raw(
+        {
+            "kanji_note_type": {"name": "Kanji", "fields": {}},
+            "vocab_note_types": [],
+            "auto_run_on_sync": True,
+        }
+    )
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
+    manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    called = {}
+
+    def fail_run_sync():
+        called["run"] = True
+        return {}
+
+    manager_with_profile.run_sync = fail_run_sync  # type: ignore[assignment]
+    manager_with_profile._on_sync_event()
+    assert "run" not in called

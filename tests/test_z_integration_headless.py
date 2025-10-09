@@ -86,6 +86,10 @@ def real_env(tmp_path_factory):
     manager._pre_answer_card_state = {}
     manager._last_question_card_id = None
     manager._debug_enabled = False
+    manager._last_vocab_sync_mod = None
+    manager._last_vocab_sync_count = None
+    manager._pending_vocab_sync_marker = None
+    manager._suppress_next_auto_sync = False
 
     aqt.mw = manager.mw
 

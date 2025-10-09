@@ -84,6 +84,12 @@ class FakeDB:
                 if any(pattern and pattern in tag_lower for pattern in patterns):
                     results.append((note.id, tags_str))
             return results
+        if sql_simple.startswith("SELECT COUNT(*), MAX(mod) FROM notes WHERE mid IN"):
+            mids = {int(mid) for mid in params}
+            matching = [note for note in self.collection.notes.values() if note.mid in mids]
+            count = len(matching)
+            max_mod = 0
+            return [(count, max_mod)]
 
         raise AssertionError(f"Unhandled SQL in test stub: {sql}")
 
@@ -119,6 +125,10 @@ class FakeCollection:
 def build_environment(kanjicards_module, reorder_mode):
     manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
     manager.mw = types.SimpleNamespace()
+    manager._last_vocab_sync_mod = None
+    manager._last_vocab_sync_count = None
+    manager._pending_vocab_sync_marker = None
+    manager._suppress_next_auto_sync = False
 
     kanji_model = {
         "id": 900,

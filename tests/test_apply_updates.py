@@ -64,6 +64,19 @@ class FakeDB:
                 for card_id, card in self.collection.cards.items()
                 if card["nid"] == note_id
             ]
+        if sql_simple.startswith("SELECT COUNT(*), MAX(mod) FROM notes WHERE mid IN"):
+            mids = {int(mid) for mid in params}
+            matching = [note for note in self.collection.notes.values() if note.mid in mids]
+            count = len(matching)
+            max_mod = 0
+            for note in matching:
+                try:
+                    note_mod = int(getattr(note, "mod", 0))
+                except Exception:
+                    note_mod = 0
+                if note_mod > max_mod:
+                    max_mod = note_mod
+            return [(count, max_mod)]
         raise AssertionError(f"Unhandled SQL query in FakeDB: {sql}")
 
     def execute(self, sql, *params):
@@ -131,6 +144,10 @@ def manager(kanjicards_module):
     manager._dictionary_cache = None
     manager._vocab_model_cache = None
     manager._realtime_error_logged = False
+    manager._last_vocab_sync_mod = None
+    manager._last_vocab_sync_count = None
+    manager._pending_vocab_sync_marker = None
+    manager._suppress_next_auto_sync = False
     return manager
 
 
@@ -550,6 +567,11 @@ def test_sync_internal_aggregates_stats(manager, kanjicards_module, monkeypatch)
         manager,
         "_update_vocab_suspension",
         lambda *args, **kwargs: {"vocab_suspended": 3, "vocab_unsuspended": 4},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_vocab_sync_marker",
+        lambda *args, **kwargs: (5, 123),
     )
 
     stats = manager._sync_internal()

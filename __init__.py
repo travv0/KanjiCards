@@ -193,6 +193,9 @@ class KanjiVocabSyncManager:
         self._last_question_card_id: Optional[int] = None
         self._debug_path: Optional[str] = None
         self._debug_enabled = False
+        self._last_vocab_sync_mod: Optional[int] = None
+        self._last_vocab_sync_count: Optional[int] = None
+        self._pending_vocab_sync_marker: Optional[Tuple[int, int]] = None
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -257,7 +260,19 @@ class KanjiVocabSyncManager:
             return {}
         self._profile_config_error_logged = False
         if isinstance(data, dict):
+            marker_mod = data.get("last_vocab_sync_mod")
+            marker_count = data.get("last_vocab_sync_count")
+            try:
+                self._last_vocab_sync_mod = int(marker_mod)
+            except Exception:
+                self._last_vocab_sync_mod = None
+            try:
+                self._last_vocab_sync_count = int(marker_count)
+            except Exception:
+                self._last_vocab_sync_count = None
             return data
+        self._last_vocab_sync_mod = None
+        self._last_vocab_sync_count = None
         return {}
 
     def _load_profile_config_or_seed(self, global_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -276,8 +291,17 @@ class KanjiVocabSyncManager:
             return
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            payload = dict(data)
+            if self._last_vocab_sync_mod is not None:
+                payload["last_vocab_sync_mod"] = int(self._last_vocab_sync_mod)
+            else:
+                payload.pop("last_vocab_sync_mod", None)
+            if self._last_vocab_sync_count is not None:
+                payload["last_vocab_sync_count"] = int(self._last_vocab_sync_count)
+            else:
+                payload.pop("last_vocab_sync_count", None)
             with open(path, "w", encoding="utf-8") as handle:
-                json.dump(data, handle, indent=2, ensure_ascii=False)
+                json.dump(payload, handle, indent=2, ensure_ascii=False)
         except Exception as err:  # noqa: BLE001
             _safe_print(f"[KanjiCards] Failed to write profile config: {err}")
 
@@ -487,14 +511,17 @@ class KanjiVocabSyncManager:
                     progress_obj.update(label="Collecting configuration…")
                 except TypeError:
                     pass
+        cfg = self.load_config()
         try:
-            stats = self._sync_internal(progress_tracker=progress_tracker)
+            stats = self._sync_internal(progress_tracker=progress_tracker, cfg=cfg)
         except Exception as err:  # noqa: BLE001
+            self._pending_vocab_sync_marker = None
             self.mw.progress.finish()
             show_critical(f"KanjiCards sync failed:\n{err}")
             return None
         else:
             self.mw.progress.finish()
+            self._commit_vocab_sync_marker(cfg)
             self._notify_summary(stats)
             self.mw.reset()
             return stats
@@ -537,8 +564,14 @@ class KanjiVocabSyncManager:
         except Exception:
             pass
 
-    def _sync_internal(self, *, progress_tracker: Optional[Dict[str, object]] = None) -> Dict[str, object]:
-        cfg = self.load_config()
+    def _sync_internal(
+        self,
+        *,
+        progress_tracker: Optional[Dict[str, object]] = None,
+        cfg: Optional[AddonConfig] = None,
+    ) -> Dict[str, object]:
+        if cfg is None:
+            cfg = self.load_config()
         collection = self.mw.col
         if collection is None:
             raise RuntimeError("Collection not available")
@@ -602,7 +635,69 @@ class KanjiVocabSyncManager:
         stats["vocab_suspended"] += suspension_stats.get("vocab_suspended", 0)
         stats["vocab_unsuspended"] += suspension_stats.get("vocab_unsuspended", 0)
 
+        marker_count, marker_mod = self._compute_vocab_sync_marker(collection, vocab_models)
+        self._pending_vocab_sync_marker = (marker_count, marker_mod)
+
         return stats
+
+    def _compute_vocab_sync_marker(
+        self,
+        collection: Collection,
+        vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
+    ) -> Tuple[int, int]:
+        model_ids = [
+            model["id"]
+            for model, _ in vocab_models
+            if isinstance(model, dict) and isinstance(model.get("id"), int)
+        ]
+        if not model_ids:
+            return 0, 0
+        placeholders = ",".join("?" for _ in model_ids)
+        try:
+            rows = _db_all(
+                collection,
+                f"SELECT COUNT(*), MAX(mod) FROM notes WHERE mid IN ({placeholders})",
+                *model_ids,
+                context="compute_vocab_sync_marker",
+            )
+        except Exception:
+            return 0, 0
+        if not rows:
+            return 0, 0
+        count_raw, max_mod_raw = rows[0]
+        try:
+            count = int(count_raw or 0)
+        except Exception:
+            count = 0
+        try:
+            max_mod = int(max_mod_raw or 0)
+        except Exception:
+            max_mod = 0
+        return count, max_mod
+
+    def _have_vocab_notes_changed(self, collection: Collection, cfg: AddonConfig) -> bool:
+        if self._last_vocab_sync_mod is None or self._last_vocab_sync_count is None:
+            return True
+        try:
+            vocab_models = self._resolve_vocab_models(collection, cfg)
+        except Exception:
+            return True
+        count, max_mod = self._compute_vocab_sync_marker(collection, vocab_models)
+        if count != self._last_vocab_sync_count:
+            return True
+        if max_mod > self._last_vocab_sync_mod:
+            return True
+        return False
+
+    def _commit_vocab_sync_marker(self, cfg: AddonConfig) -> None:
+        if self._pending_vocab_sync_marker is None:
+            return
+        count, max_mod = self._pending_vocab_sync_marker
+        self._last_vocab_sync_count = int(count)
+        self._last_vocab_sync_mod = int(max_mod)
+        raw = self._serialize_config(cfg)
+        self._write_profile_config(raw)
+        self._pending_vocab_sync_marker = None
 
     def _on_reviewer_did_show_question(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
@@ -894,6 +989,9 @@ class KanjiVocabSyncManager:
         if not cfg.auto_run_on_sync:
             return
         if not self.mw or not self.mw.col:
+            return
+        collection = self.mw.col
+        if not self._have_vocab_notes_changed(collection, cfg):
             return
 
         def trigger() -> None:
