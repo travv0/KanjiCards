@@ -146,6 +146,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="needs_suspend",
+        low_interval_vocab_tag="",
     )
 
     kanji_model_resolved, field_indexes, kanji_field_index = manager._get_kanji_model_context(col, cfg)
@@ -171,6 +172,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, bad_cfg)
@@ -192,6 +194,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, missing_cfg)
@@ -214,6 +217,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, bad_field_cfg)
@@ -236,6 +240,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, missing_field_cfg)

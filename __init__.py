@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from anki.collection import Collection
 from anki.models import NotetypeDict
@@ -97,9 +97,6 @@ BUCKET_TAG_KEYS: Tuple[str, str, str] = (
     "no_vocab",
 )
 
-IntervalMode = Literal["current", "historical"]
-VALID_INTERVAL_MODES: Tuple[IntervalMode, IntervalMode] = ("current", "historical")
-
 
 def _safe_print(*args: object, **kwargs: Any) -> None:
     try:
@@ -164,6 +161,7 @@ class AddonConfig:
     known_kanji_interval: int
     auto_suspend_vocab: bool
     auto_suspend_tag: str
+    low_interval_vocab_tag: str
 
 
 @dataclass
@@ -174,6 +172,17 @@ class KanjiUsageInfo:
     first_new_due: Optional[int] = None
     first_new_order: Optional[int] = None
     vocab_occurrences: int = 0
+
+
+@dataclass
+class KanjiIntervalStatus:
+    has_review_card: bool = False
+    current_interval: int = 0
+    historical_interval: int = 0
+
+    @property
+    def has_history(self) -> bool:
+        return self.historical_interval > 0 or self.has_review_card
 
 
 class KanjiVocabSyncManager:
@@ -400,6 +409,7 @@ class KanjiVocabSyncManager:
             known_kanji_interval=interval_value,
             auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
             auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_new"),
+            low_interval_vocab_tag=raw.get("low_interval_vocab_tag", ""),
         )
 
     def _serialize_config(self, cfg: AddonConfig) -> Dict[str, Any]:
@@ -427,6 +437,7 @@ class KanjiVocabSyncManager:
             "known_kanji_interval": int(cfg.known_kanji_interval),
             "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
             "auto_suspend_tag": cfg.auto_suspend_tag,
+            "low_interval_vocab_tag": cfg.low_interval_vocab_tag,
         }
 
     def load_config(self) -> AddonConfig:
@@ -1945,25 +1956,16 @@ class KanjiVocabSyncManager:
 
         return stats
 
-    def _compute_kanji_reviewed_flags(
+    def _compute_kanji_interval_status(
         self,
         collection: Collection,
         existing_notes: Dict[str, int],
-        min_interval: int,
-        interval_mode: IntervalMode,
-    ) -> Dict[str, bool]:
+    ) -> Dict[str, KanjiIntervalStatus]:
         if not existing_notes:
             return {}
         note_ids = list(dict.fromkeys(existing_notes.values()))
         if not note_ids:
             return {}
-        try:
-            threshold = int(min_interval)
-        except Exception:
-            threshold = 0
-        if threshold < 0:
-            threshold = 0
-        mode_value: IntervalMode = interval_mode if interval_mode in VALID_INTERVAL_MODES else "current"
         rows: List[Tuple[int, int, int]] = []
         for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
             placeholders = ",".join("?" for _ in batch_ids)
@@ -1977,57 +1979,64 @@ class KanjiVocabSyncManager:
                         f"FROM cards WHERE nid IN ({placeholders}) GROUP BY nid"
                     ),
                     *batch_ids,
-                    context=f"compute_kanji_reviewed_flags/batch{batch_index}",
+                    context=f"compute_kanji_interval_status/batch{batch_index}",
                 )
             )
-        status_by_note: Dict[int, bool] = {}
-        historical_max_by_note: Dict[int, int] = {}
-        if mode_value == "historical":
-            for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
-                placeholders = ",".join("?" for _ in batch_ids)
-                historical_rows = _db_all(
-                    collection,
-                    (
-                        "SELECT cards.nid, "
-                        "MAX(CASE WHEN revlog.ivl > 0 THEN revlog.ivl ELSE 0 END) AS max_revlog_interval "
-                        "FROM cards "
-                        "JOIN revlog ON revlog.cid = cards.id "
-                        f"WHERE cards.nid IN ({placeholders}) "
-                        "GROUP BY cards.nid"
-                    ),
-                    *batch_ids,
-                    context=f"compute_kanji_reviewed_flags/revlog_batch{batch_index}",
-                )
-                for nid, max_revlog_interval in historical_rows:
-                    try:
-                        historical_max_by_note[nid] = int(max_revlog_interval)
-                    except Exception:
-                        historical_max_by_note[nid] = 0
+        status_rows: Dict[int, Tuple[int, int]] = {}
         for nid, reviewed_flag, max_interval in rows:
-            reviewed = bool(reviewed_flag)
-            if mode_value == "historical":
-                interval_value_raw: Optional[int] = historical_max_by_note.get(nid, 0)
+            status_rows[nid] = (reviewed_flag, max_interval)
+
+        historical_max_by_note: Dict[int, int] = {}
+        for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
+            placeholders = ",".join("?" for _ in batch_ids)
+            historical_rows = _db_all(
+                collection,
+                (
+                    "SELECT cards.nid, "
+                    "MAX(CASE WHEN revlog.ivl > 0 THEN revlog.ivl ELSE 0 END) AS max_revlog_interval "
+                    "FROM cards "
+                    "JOIN revlog ON revlog.cid = cards.id "
+                    f"WHERE cards.nid IN ({placeholders}) "
+                    "GROUP BY cards.nid"
+                ),
+                *batch_ids,
+                context=f"compute_kanji_interval_status/revlog_batch{batch_index}",
+            )
+            for nid, max_revlog_interval in historical_rows:
                 try:
-                    interval_value = int(interval_value_raw) if interval_value_raw is not None else 0
+                    historical_max_by_note[nid] = int(max_revlog_interval)
                 except Exception:
-                    interval_value = 0
-                if interval_value <= 0:
-                    try:
-                        interval_value = int(max_interval)
-                    except Exception:
-                        interval_value = 0
-                if interval_value > 0:
-                    reviewed = True
-            else:
-                interval_value_raw = max_interval
-                try:
-                    interval_value = int(interval_value_raw)
-                except Exception:
-                    interval_value = 0
-            if reviewed and threshold > 0:
-                reviewed = interval_value >= threshold
-            status_by_note[nid] = reviewed
-        return {char: status_by_note.get(note_id, False) for char, note_id in existing_notes.items()}
+                    historical_max_by_note[nid] = 0
+
+        status_by_note: Dict[int, KanjiIntervalStatus] = {}
+        for note_id in note_ids:
+            reviewed_flag, max_interval = status_rows.get(note_id, (0, 0))
+            has_review_card = bool(reviewed_flag)
+            try:
+                current_interval = int(max_interval)
+            except Exception:
+                current_interval = 0
+            if current_interval < 0:
+                current_interval = 0
+            historical_interval_raw = historical_max_by_note.get(note_id, 0)
+            try:
+                historical_interval = int(historical_interval_raw)
+            except Exception:
+                historical_interval = 0
+            if historical_interval < 0:
+                historical_interval = 0
+            if historical_interval <= 0:
+                historical_interval = current_interval
+            status_by_note[note_id] = KanjiIntervalStatus(
+                has_review_card=has_review_card,
+                current_interval=current_interval,
+                historical_interval=historical_interval,
+            )
+
+        return {
+            char: status_by_note.get(note_id, KanjiIntervalStatus())
+            for char, note_id in existing_notes.items()
+        }
 
     def _fetch_vocab_rows(
         self,
@@ -2157,24 +2166,24 @@ class KanjiVocabSyncManager:
             self._debug("realtime/update_empty", target=target_display)
             return stats
         tag_lower = tag.lower()
-        kanji_current_intervals = self._compute_kanji_reviewed_flags(
-            collection,
-            existing_notes,
-            cfg.known_kanji_interval,
-            "current",
-        )
+        low_interval_tag = cfg.low_interval_vocab_tag.strip()
+        low_interval_lower = low_interval_tag.lower()
+        try:
+            threshold = int(cfg.known_kanji_interval)
+        except Exception:
+            threshold = 0
+        if threshold < 0:
+            threshold = 0
+        kanji_status = self._compute_kanji_interval_status(collection, existing_notes)
         force_chars_set: Set[str] = set()
         if force_chars_reviewed:
             force_chars_set = {char for char in force_chars_reviewed if char}
-            for char in force_chars_set:
-                kanji_current_intervals[char] = True
             self._debug(
                 "realtime/status",
                 target="".join(sorted(force_chars_set)),
                 notes=len(notes_info),
                 tag=tag,
             )
-        kanji_historical_intervals: Optional[Dict[str, bool]] = None
         card_map = self._load_card_status_for_notes(collection, notes_info.keys())
 
         for note_id, (chars, tag_set) in notes_info.items():
@@ -2185,22 +2194,49 @@ class KanjiVocabSyncManager:
                 isinstance(card_type, int) and card_type != 0
                 for _, _, card_type in cards
             )
-            status_lookup: Dict[str, bool]
-            if note_has_reviewed_card:
-                if kanji_historical_intervals is None:
-                    kanji_historical_intervals = self._compute_kanji_reviewed_flags(
-                        collection,
-                        existing_notes,
-                        cfg.known_kanji_interval,
-                        "historical",
-                    )
-                    if force_chars_set:
-                        for char in force_chars_set:
-                            kanji_historical_intervals[char] = True
-                status_lookup = kanji_historical_intervals
-            else:
-                status_lookup = kanji_current_intervals
-            requires_suspend = any(not status_lookup.get(char, False) for char in chars)
+            requires_suspend = False
+            for char in chars:
+                if char in force_chars_set:
+                    continue
+                status = kanji_status.get(char)
+                if status is None:
+                    requires_suspend = True
+                    break
+                if note_has_reviewed_card:
+                    has_history = status.has_history
+                    if not has_history:
+                        requires_suspend = True
+                        break
+                    if threshold > 0 and status.historical_interval < threshold:
+                        requires_suspend = True
+                        break
+                else:
+                    if not status.has_review_card:
+                        requires_suspend = True
+                        break
+                    if threshold > 0 and status.current_interval < threshold:
+                        requires_suspend = True
+                        break
+            needs_low_interval_tag = False
+            if low_interval_tag and threshold > 0:
+                for char in chars:
+                    if char in force_chars_set:
+                        continue
+                    status = kanji_status.get(char)
+                    if not status:
+                        continue
+                    if status.has_review_card and status.current_interval < threshold:
+                        needs_low_interval_tag = True
+                        break
+            note_obj: Optional[Note] = None
+            changed = False
+
+            def ensure_note() -> Note:
+                nonlocal note_obj
+                if note_obj is None:
+                    note_obj = _get_note(collection, note_id)
+                return note_obj
+
             if cfg.auto_suspend_vocab:
                 if requires_suspend:
                     self._debug(
@@ -2209,54 +2245,68 @@ class KanjiVocabSyncManager:
                         chars="".join(sorted(chars)),
                     )
                     unsuspended_cards = [card_id for card_id, queue, _ in cards if queue != -1]
-                    if not unsuspended_cards:
-                        continue
-                    note = _get_note(collection, note_id)
-                    suspended_count = _resuspend_note_cards(collection, note)
-                    if suspended_count > 0:
-                        stats["vocab_suspended"] += suspended_count
-                        existing_lower = {value.lower() for value in note.tags}
+                    if unsuspended_cards:
+                        note_obj_local = ensure_note()
+                        suspended_count = _resuspend_note_cards(collection, note_obj_local)
+                        if suspended_count > 0:
+                            stats["vocab_suspended"] += suspended_count
+                        existing_lower = {value.lower() for value in note_obj_local.tags}
                         if tag_lower not in existing_lower:
-                            _add_tag(note, tag)
-                            note.flush()
-                    continue
+                            _add_tag(note_obj_local, tag)
+                            changed = True
+                            note_has_tag = True
+                    elif not note_has_tag:
+                        note_obj_local = ensure_note()
+                        existing_lower = {value.lower() for value in note_obj_local.tags}
+                        if tag_lower not in existing_lower:
+                            _add_tag(note_obj_local, tag)
+                            changed = True
+                            note_has_tag = True
+                else:
+                    if note_has_tag:
+                        note_obj_local = ensure_note()
+                        suspended_cards = [card_id for card_id, queue, _ in cards if queue == -1]
+                        if suspended_cards:
+                            self._debug(
+                                "realtime/unsuspend",
+                                note_id=note_id,
+                                chars="".join(sorted(chars)),
+                                count=len(suspended_cards),
+                            )
+                            _unsuspend_cards(collection, suspended_cards)
+                            stats["vocab_unsuspended"] += len(suspended_cards)
+                        if _remove_tag_case_insensitive(note_obj_local, tag):
+                            changed = True
+                            note_has_tag = False
+            else:
+                if note_has_tag:
+                    note_obj_local = ensure_note()
+                    suspended_cards = [card_id for card_id, queue, _ in cards if queue == -1]
+                    if suspended_cards:
+                        _unsuspend_cards(collection, suspended_cards)
+                        stats["vocab_unsuspended"] += len(suspended_cards)
+                    if _remove_tag_case_insensitive(note_obj_local, tag):
+                        changed = True
+                        note_has_tag = False
 
-                if not note_has_tag:
-                    continue
+            if low_interval_tag and threshold > 0:
+                low_tag_present = False
+                if note_obj is not None:
+                    low_tag_present = any(value.lower() == low_interval_lower for value in note_obj.tags)
+                else:
+                    low_tag_present = low_interval_lower in tag_set_lower
+                if needs_low_interval_tag:
+                    if not low_tag_present:
+                        note_obj_local = ensure_note()
+                        _add_tag(note_obj_local, low_interval_tag)
+                        changed = True
+                elif low_tag_present:
+                    note_obj_local = ensure_note()
+                    if _remove_tag_case_insensitive(note_obj_local, low_interval_tag):
+                        changed = True
 
-                suspended_cards = [card_id for card_id, queue, _ in cards if queue == -1]
-                note = _get_note(collection, note_id)
-                changed = False
-                if suspended_cards:
-                    self._debug(
-                        "realtime/unsuspend",
-                        note_id=note_id,
-                        chars="".join(sorted(chars)),
-                        count=len(suspended_cards),
-                    )
-                    _unsuspend_cards(collection, suspended_cards)
-                    stats["vocab_unsuspended"] += len(suspended_cards)
-                    changed = True
-                if _remove_tag_case_insensitive(note, tag):
-                    changed = True
-                if changed:
-                    note.flush()
-                continue
-
-            if not note_has_tag:
-                continue
-
-            note = _get_note(collection, note_id)
-            suspended_cards = [card_id for card_id, queue, _ in cards if queue == -1]
-            changed = False
-            if suspended_cards:
-                _unsuspend_cards(collection, suspended_cards)
-                stats["vocab_unsuspended"] += len(suspended_cards)
-                changed = True
-            if _remove_tag_case_insensitive(note, tag):
-                changed = True
-            if changed:
-                note.flush()
+            if note_obj is not None and changed:
+                note_obj.flush()
 
         return stats
 
@@ -2537,6 +2587,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         self.auto_suspend_tag_edit = QLineEdit(self.config.auto_suspend_tag)
         self.auto_suspend_tag_edit.setEnabled(self.config.auto_suspend_vocab)
         self.auto_suspend_check.toggled.connect(self.auto_suspend_tag_edit.setEnabled)
+        self.low_interval_vocab_tag_edit = QLineEdit(self.config.low_interval_vocab_tag)
         self.reorder_combo = QComboBox()
         self.reorder_combo.addItem("Frequency (KANJIDIC)", "frequency")
         self.reorder_combo.addItem("Vocabulary frequency", "vocab_frequency")
@@ -2566,6 +2617,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         form.addRow("", self.ignore_suspended_check)
         form.addRow("", self.auto_suspend_check)
         form.addRow("Suspension tag", self.auto_suspend_tag_edit)
+        form.addRow("Below-threshold vocab tag", self.low_interval_vocab_tag_edit)
         form.addRow("Order new kanji cards", self.reorder_combo)
         form.addRow("Reviewed vocab bucket tag", self.bucket_reviewed_tag_edit)
         form.addRow("Unreviewed vocab bucket tag", self.bucket_unreviewed_tag_edit)
@@ -2753,6 +2805,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         }
         self.config.only_new_vocab_tag = self.only_new_vocab_tag_edit.text().strip()
         self.config.no_vocab_tag = self.no_vocab_tag_edit.text().strip()
+        self.config.low_interval_vocab_tag = self.low_interval_vocab_tag_edit.text().strip()
         return True
 
     def _populate_deck_combo(self) -> None:

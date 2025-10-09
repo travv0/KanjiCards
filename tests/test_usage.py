@@ -48,6 +48,7 @@ def make_config(kanjicards_module):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        low_interval_vocab_tag="",
     )
 
 

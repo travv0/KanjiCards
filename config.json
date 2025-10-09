@@ -29,5 +29,6 @@
   "ignore_suspended_vocab": false,
   "known_kanji_interval": 21,
   "auto_suspend_vocab": false,
-  "auto_suspend_tag": "kanjicards_new"
+  "auto_suspend_tag": "kanjicards_new",
+  "low_interval_vocab_tag": ""
 }

@@ -183,6 +183,7 @@ def make_config(kanjicards_module, **overrides):
         "known_kanji_interval": 21,
         "auto_suspend_vocab": False,
         "auto_suspend_tag": "",
+        "low_interval_vocab_tag": "",
     }
     base.update(overrides)
     return kanjicards_module.AddonConfig(**base)
@@ -345,8 +346,10 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
     )
     monkeypatch.setattr(
         manager,
-        "_compute_kanji_reviewed_flags",
-        lambda *args, **kwargs: {"火": False},
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(has_review_card=True, current_interval=0, historical_interval=0)
+        },
     )
     monkeypatch.setattr(
         manager,
@@ -397,8 +400,10 @@ def test_update_vocab_suspension_unsuspends_and_clears_tag(manager, kanjicards_m
     )
     monkeypatch.setattr(
         manager,
-        "_compute_kanji_reviewed_flags",
-        lambda *args, **kwargs: {"火": True},
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(has_review_card=True, current_interval=25, historical_interval=25)
+        },
     )
     monkeypatch.setattr(
         manager,
@@ -444,6 +449,7 @@ def test_update_vocab_suspension_uses_historical_for_reviewed_vocab(manager, kan
         kanjicards_module,
         auto_suspend_vocab=True,
         auto_suspend_tag="NeedsSuspend",
+        low_interval_vocab_tag="LowInterval",
     )
     note = SimpleNote(303, tags=["NeedsSuspend"])
     collection = types.SimpleNamespace()
@@ -454,10 +460,17 @@ def test_update_vocab_suspension_uses_historical_for_reviewed_vocab(manager, kan
         lambda *args, **kwargs: {303: ({"火"}, {"NeedsSuspend"})},
     )
 
-    def fake_compute(collection, existing, interval, mode):
-        return {"火": mode == "historical"}
-
-    monkeypatch.setattr(manager, "_compute_kanji_reviewed_flags", fake_compute)
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(
+                has_review_card=True,
+                current_interval=5,
+                historical_interval=50,
+            )
+        },
+    )
     monkeypatch.setattr(
         manager,
         "_load_card_status_for_notes",
@@ -485,73 +498,112 @@ def test_update_vocab_suspension_uses_historical_for_reviewed_vocab(manager, kan
     assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1}
     assert unsuspended == [701]
     assert "needssuspend" not in {tag.lower() for tag in note.tags}
+    assert "lowinterval" in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
 
 
-def test_compute_kanji_reviewed_flags(manager, kanjicards_module, monkeypatch):
-    calls = []
+def test_update_vocab_suspension_tags_new_note_with_low_interval(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=False,
+        auto_suspend_tag="NeedsSuspend",
+        low_interval_vocab_tag="LowInterval",
+    )
+    note = SimpleNote(404)
+    collection = types.SimpleNamespace()
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {404: ({"火"}, set())},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(
+                has_review_card=True,
+                current_interval=5,
+                historical_interval=5,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {404: [(801, 0, 0)]},
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0}
+    assert "lowinterval" in {tag.lower() for tag in note.tags}
+    assert note.flush_count == 1
+
+
+def test_compute_kanji_interval_status_basic(manager, kanjicards_module, monkeypatch):
+    contexts = []
 
     def fake_db_all(collection, sql, *params, context=""):
-        calls.append(context)
+        contexts.append(context)
+        if context.startswith("compute_kanji_interval_status/revlog"):
+            return []
         return [(1, 1, 25), (2, 1, 10), (3, 0, 0)]
 
     monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
 
     existing = {"火": 1, "水": 2, "風": 3}
-    result = manager._compute_kanji_reviewed_flags(
-        types.SimpleNamespace(),
-        existing,
-        21,
-        "current",
-    )
+    result = manager._compute_kanji_interval_status(types.SimpleNamespace(), existing)
 
-    assert result == {"火": True, "水": False, "風": False}
-    assert calls and calls[0].startswith("compute_kanji_reviewed_flags")
-
-
-def test_compute_kanji_reviewed_flags_zero_threshold(manager, kanjicards_module, monkeypatch):
-    monkeypatch.setattr(
-        kanjicards_module,
-        "_db_all",
-        lambda *args, **kwargs: [(1, 1, 5)],
-    )
-
-    result = manager._compute_kanji_reviewed_flags(
-        types.SimpleNamespace(),
-        {"火": 1},
-        0,
-        "current",
-    )
-    assert result == {"火": True}
+    assert contexts and contexts[0].startswith("compute_kanji_interval_status")
+    assert result["火"].has_review_card is True
+    assert result["火"].current_interval == 25
+    assert result["火"].historical_interval == 25
+    assert result["水"].has_review_card is True
+    assert result["水"].current_interval == 10
+    assert result["風"].has_review_card is False
 
 
-def test_compute_kanji_reviewed_flags_historical_uses_revlog(manager, kanjicards_module, monkeypatch):
+def test_compute_kanji_interval_status_fallback_to_current(manager, kanjicards_module, monkeypatch):
+    def fake_db_all(collection, sql, *params, context=""):
+        if context.startswith("compute_kanji_interval_status/revlog"):
+            return [(1, 0)]
+        return [(1, 1, 7)]
+
+    monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
+
+    result = manager._compute_kanji_interval_status(types.SimpleNamespace(), {"火": 1})
+    status = result["火"]
+    assert status.has_review_card is True
+    assert status.current_interval == 7
+    assert status.historical_interval == 7
+
+
+def test_compute_kanji_interval_status_historical_uses_revlog(manager, kanjicards_module, monkeypatch):
     contexts = []
 
     def fake_db_all(collection, sql, *params, context=""):
         contexts.append(context)
-        if "revlog" in context:
-            return [
-                (1, 200),
-                (2, 60),
-            ]
-        return [
-            (1, 0, 30),
-            (2, 1, 50),
-        ]
+        if context.startswith("compute_kanji_interval_status/revlog"):
+            return [(1, 200), (2, 60)]
+        return [(1, 0, 30), (2, 1, 50)]
 
     monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
 
-    existing = {"火": 1, "水": 2}
-    result = manager._compute_kanji_reviewed_flags(
-        types.SimpleNamespace(),
-        existing,
-        100,
-        "historical",
-    )
-
-    assert result == {"火": True, "水": False}
+    result = manager._compute_kanji_interval_status(types.SimpleNamespace(), {"火": 1, "水": 2})
     assert any("revlog" in ctx for ctx in contexts)
+    assert result["火"].historical_interval == 200
+    assert result["火"].has_history is True
+    assert result["水"].historical_interval == 60
+    assert result["水"].has_history is True
 
 
 def test_collect_vocab_note_chars_filters(manager, monkeypatch):
