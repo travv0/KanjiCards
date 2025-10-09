@@ -647,6 +647,20 @@ def test_compute_kanji_interval_status_fallback_to_current(manager, kanjicards_m
     assert status.historical_interval == 7
 
 
+def test_compute_kanji_interval_status_prefers_current_when_higher(manager, kanjicards_module, monkeypatch):
+    def fake_db_all(collection, sql, *params, context=""):
+        if context.startswith("compute_kanji_interval_status/revlog"):
+            return [(1, 5)]
+        return [(1, 1, 40)]
+
+    monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
+
+    result = manager._compute_kanji_interval_status(types.SimpleNamespace(), {"火": 1})
+    status = result["火"]
+    assert status.current_interval == 40
+    assert status.historical_interval == 40
+
+
 def test_compute_kanji_interval_status_historical_uses_revlog(manager, kanjicards_module, monkeypatch):
     contexts = []
 

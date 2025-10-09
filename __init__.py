@@ -2028,7 +2028,7 @@ class KanjiVocabSyncManager:
                 historical_interval = 0
             if historical_interval < 0:
                 historical_interval = 0
-            if historical_interval <= 0:
+            if historical_interval <= 0 or historical_interval < current_interval:
                 historical_interval = current_interval
             status_by_note[note_id] = KanjiIntervalStatus(
                 has_review_card=has_review_card,
