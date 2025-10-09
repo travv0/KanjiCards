@@ -72,6 +72,7 @@ def make_config(kanjicards_module, **overrides):
         "known_kanji_interval": 21,
         "auto_suspend_vocab": False,
         "auto_suspend_tag": "",
+        "resuspend_reviewed_low_interval": False,
         "low_interval_vocab_tag": "",
     }
     base.update(overrides)

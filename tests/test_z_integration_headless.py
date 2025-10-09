@@ -146,6 +146,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="needs_suspend",
+        resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
     )
 
@@ -172,6 +173,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):
@@ -194,6 +196,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):
@@ -217,6 +220,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):
@@ -240,6 +244,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         known_kanji_interval=21,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
+        resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
     )
     with pytest.raises(RuntimeError):

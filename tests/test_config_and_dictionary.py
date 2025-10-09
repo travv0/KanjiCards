@@ -80,6 +80,7 @@ def test_config_roundtrip(manager, kanjicards_module):
         "ignore_suspended_vocab": True,
         "auto_suspend_vocab": True,
         "auto_suspend_tag": "auto_suspend",
+        "resuspend_reviewed_low_interval": True,
         "low_interval_vocab_tag": "needs_interval",
     }
     cfg = manager._config_from_raw(raw)
@@ -90,6 +91,7 @@ def test_config_roundtrip(manager, kanjicards_module):
     assert serialized["existing_tag"] == "has_vocab_kanji"
     assert serialized["kanji_note_type"]["fields"]["kanji"] == "Character"
     assert serialized["bucket_tags"]["reviewed_vocab"] == "rev"
+    assert serialized["resuspend_reviewed_low_interval"] is True
     assert serialized["low_interval_vocab_tag"] == "needs_interval"
 
 
