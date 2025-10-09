@@ -409,7 +409,7 @@ class KanjiVocabSyncManager:
             ignore_suspended_vocab=bool(raw.get("ignore_suspended_vocab", False)),
             known_kanji_interval=interval_value,
             auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
-            auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_unreviewed"),
+            auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_new"),
             known_interval_mode=interval_mode,
         )
 

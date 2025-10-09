@@ -8,6 +8,7 @@ KanjiCards loads as an Anki add-on through the top-level `__init__.py`, which wi
 - `pytest` — run the full test matrix with coverage thresholds enforced by `pytest.ini`.
 - `pytest tests/test_realtime_and_helpers.py -k import` — target focused investigations without losing fixtures.
 - `python -m compileall .` — optional smoke check to catch syntax regressions before shipping.
+- From WSL sessions, invoke tests through Windows by running `powershell.exe -Command "pytest"` so the Anki tooling resolves correctly.
 
 ## Coding Style & Naming Conventions
 Match the existing PEP 8 style: four-space indents, 120-character practical ceiling, and generous docstrings for user-facing flows. Prefer `snake_case` for functions, helpers, and module-level constants; reserve `CamelCase` for Qt widgets and dataclasses such as `VocabNoteTypeConfig`. Type hints are expected for new public interfaces, with `Optional` and `Sequence` mirroring how the add-on exchanges data with Anki’s APIs. When touching Qt code, keep translatable strings centralized so localized builds stay manageable.

@@ -30,5 +30,5 @@
   "known_kanji_interval": 21,
   "known_interval_mode": "current",
   "auto_suspend_vocab": false,
-  "auto_suspend_tag": "kanjicards_unreviewed"
+  "auto_suspend_tag": "kanjicards_new"
 }
