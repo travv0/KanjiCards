@@ -98,8 +98,7 @@ BUCKET_TAG_KEYS: Tuple[str, str, str] = (
 )
 
 IntervalMode = Literal["current", "historical"]
-INTERVAL_MODE_OPTIONS: Tuple[IntervalMode, IntervalMode] = ("current", "historical")
-DEFAULT_INTERVAL_MODE: IntervalMode = "current"
+VALID_INTERVAL_MODES: Tuple[IntervalMode, IntervalMode] = ("current", "historical")
 
 
 def _safe_print(*args: object, **kwargs: Any) -> None:
@@ -165,7 +164,6 @@ class AddonConfig:
     known_kanji_interval: int
     auto_suspend_vocab: bool
     auto_suspend_tag: str
-    known_interval_mode: IntervalMode = DEFAULT_INTERVAL_MODE
 
 
 @dataclass
@@ -384,14 +382,6 @@ class KanjiVocabSyncManager:
             interval_value = 21
         if interval_value < 0:
             interval_value = 0
-        interval_mode_raw = raw.get("known_interval_mode", DEFAULT_INTERVAL_MODE)
-        if isinstance(interval_mode_raw, str):
-            interval_mode = interval_mode_raw.strip().lower()
-        else:
-            interval_mode = DEFAULT_INTERVAL_MODE
-        if interval_mode not in INTERVAL_MODE_OPTIONS:
-            interval_mode = DEFAULT_INTERVAL_MODE
-
         return AddonConfig(
             vocab_note_types=vocab_cfg,
             kanji_note_type=kanji_cfg,
@@ -410,7 +400,6 @@ class KanjiVocabSyncManager:
             known_kanji_interval=interval_value,
             auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
             auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_new"),
-            known_interval_mode=interval_mode,
         )
 
     def _serialize_config(self, cfg: AddonConfig) -> Dict[str, Any]:
@@ -436,11 +425,6 @@ class KanjiVocabSyncManager:
             "reorder_mode": cfg.reorder_mode,
             "ignore_suspended_vocab": bool(cfg.ignore_suspended_vocab),
             "known_kanji_interval": int(cfg.known_kanji_interval),
-            "known_interval_mode": (
-                cfg.known_interval_mode
-                if cfg.known_interval_mode in INTERVAL_MODE_OPTIONS
-                else DEFAULT_INTERVAL_MODE
-            ),
             "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
             "auto_suspend_tag": cfg.auto_suspend_tag,
         }
@@ -1979,7 +1963,7 @@ class KanjiVocabSyncManager:
             threshold = 0
         if threshold < 0:
             threshold = 0
-        mode_value: IntervalMode = interval_mode if interval_mode in INTERVAL_MODE_OPTIONS else DEFAULT_INTERVAL_MODE
+        mode_value: IntervalMode = interval_mode if interval_mode in VALID_INTERVAL_MODES else "current"
         rows: List[Tuple[int, int, int]] = []
         for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
             placeholders = ",".join("?" for _ in batch_ids)
@@ -2103,24 +2087,24 @@ class KanjiVocabSyncManager:
         self,
         collection: Collection,
         note_ids: Sequence[int],
-    ) -> Dict[int, List[Tuple[int, int]]]:
+    ) -> Dict[int, List[Tuple[int, int, int]]]:
         unique_ids = list(dict.fromkeys(note_ids))
         if not unique_ids:
             return {}
-        rows: List[Tuple[int, int, int]] = []
+        rows: List[Tuple[int, int, int, int]] = []
         for batch_index, batch_ids in enumerate(_chunk_sequence(unique_ids, SQLITE_MAX_VARIABLES)):
             placeholders = ",".join("?" for _ in batch_ids)
             rows.extend(
                 _db_all(
                     collection,
-                    f"SELECT id, nid, queue FROM cards WHERE nid IN ({placeholders})",
+                    f"SELECT id, nid, queue, type FROM cards WHERE nid IN ({placeholders})",
                     *batch_ids,
                     context=f"load_card_status_for_notes/batch{batch_index}",
                 )
             )
-        card_map: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
-        for card_id, nid, queue in rows:
-            card_map[nid].append((card_id, queue))
+        card_map: Dict[int, List[Tuple[int, int, int]]] = defaultdict(list)
+        for card_id, nid, queue, ctype in rows:
+            card_map[nid].append((card_id, queue, ctype))
         return card_map
 
     def _load_note_active_status(
@@ -2173,29 +2157,50 @@ class KanjiVocabSyncManager:
             self._debug("realtime/update_empty", target=target_display)
             return stats
         tag_lower = tag.lower()
-        kanji_reviewed = self._compute_kanji_reviewed_flags(
+        kanji_current_intervals = self._compute_kanji_reviewed_flags(
             collection,
             existing_notes,
             cfg.known_kanji_interval,
-            cfg.known_interval_mode,
+            "current",
         )
+        force_chars_set: Set[str] = set()
         if force_chars_reviewed:
-            for char in force_chars_reviewed:
-                if char:
-                    kanji_reviewed[char] = True
+            force_chars_set = {char for char in force_chars_reviewed if char}
+            for char in force_chars_set:
+                kanji_current_intervals[char] = True
             self._debug(
                 "realtime/status",
-                target="".join(sorted(force_chars_reviewed)),
+                target="".join(sorted(force_chars_set)),
                 notes=len(notes_info),
                 tag=tag,
             )
+        kanji_historical_intervals: Optional[Dict[str, bool]] = None
         card_map = self._load_card_status_for_notes(collection, notes_info.keys())
 
         for note_id, (chars, tag_set) in notes_info.items():
             tag_set_lower = {value.lower() for value in tag_set}
             note_has_tag = tag_lower in tag_set_lower
-            requires_suspend = any(not kanji_reviewed.get(char, False) for char in chars)
             cards = card_map.get(note_id, [])
+            note_has_reviewed_card = any(
+                isinstance(card_type, int) and card_type != 0
+                for _, _, card_type in cards
+            )
+            status_lookup: Dict[str, bool]
+            if note_has_reviewed_card:
+                if kanji_historical_intervals is None:
+                    kanji_historical_intervals = self._compute_kanji_reviewed_flags(
+                        collection,
+                        existing_notes,
+                        cfg.known_kanji_interval,
+                        "historical",
+                    )
+                    if force_chars_set:
+                        for char in force_chars_set:
+                            kanji_historical_intervals[char] = True
+                status_lookup = kanji_historical_intervals
+            else:
+                status_lookup = kanji_current_intervals
+            requires_suspend = any(not status_lookup.get(char, False) for char in chars)
             if cfg.auto_suspend_vocab:
                 if requires_suspend:
                     self._debug(
@@ -2203,7 +2208,7 @@ class KanjiVocabSyncManager:
                         note_id=note_id,
                         chars="".join(sorted(chars)),
                     )
-                    unsuspended_cards = [card_id for card_id, queue in cards if queue != -1]
+                    unsuspended_cards = [card_id for card_id, queue, _ in cards if queue != -1]
                     if not unsuspended_cards:
                         continue
                     note = _get_note(collection, note_id)
@@ -2219,7 +2224,7 @@ class KanjiVocabSyncManager:
                 if not note_has_tag:
                     continue
 
-                suspended_cards = [card_id for card_id, queue in cards if queue == -1]
+                suspended_cards = [card_id for card_id, queue, _ in cards if queue == -1]
                 note = _get_note(collection, note_id)
                 changed = False
                 if suspended_cards:
@@ -2242,7 +2247,7 @@ class KanjiVocabSyncManager:
                 continue
 
             note = _get_note(collection, note_id)
-            suspended_cards = [card_id for card_id, queue in cards if queue == -1]
+            suspended_cards = [card_id for card_id, queue, _ in cards if queue == -1]
             changed = False
             if suspended_cards:
                 _unsuspend_cards(collection, suspended_cards)
@@ -2523,17 +2528,6 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         except Exception:
             interval_value = 0
         self.known_interval_spin.setValue(max(0, interval_value))
-        self.known_interval_mode_combo = QComboBox()
-        self.known_interval_mode_combo.addItem("Only current interval must meet threshold", "current")
-        self.known_interval_mode_combo.addItem("Any past interval may meet threshold", "historical")
-        mode_value = (
-            self.config.known_interval_mode
-            if self.config.known_interval_mode in INTERVAL_MODE_OPTIONS
-            else DEFAULT_INTERVAL_MODE
-        )
-        mode_index = self.known_interval_mode_combo.findData(mode_value)
-        if mode_index >= 0:
-            self.known_interval_mode_combo.setCurrentIndex(mode_index)
         self.auto_sync_check = QCheckBox("Run automatically after sync")
         self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
         self.ignore_suspended_check = QCheckBox("Ignore suspended vocab cards")
@@ -2568,7 +2562,6 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         form.addRow("Kanji deck", self.deck_combo)
         form.addRow("", self.realtime_check)
         form.addRow("Known kanji interval (days)", self.known_interval_spin)
-        form.addRow("Interval requirement", self.known_interval_mode_combo)
         form.addRow("", self.auto_sync_check)
         form.addRow("", self.ignore_suspended_check)
         form.addRow("", self.auto_suspend_check)
@@ -2743,10 +2736,6 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         except Exception:
             known_interval = 0
         self.config.known_kanji_interval = max(0, known_interval)
-        mode_value = self.known_interval_mode_combo.currentData()
-        if not isinstance(mode_value, str) or mode_value not in INTERVAL_MODE_OPTIONS:
-            mode_value = DEFAULT_INTERVAL_MODE
-        self.config.known_interval_mode = mode_value
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
         self.config.ignore_suspended_vocab = self.ignore_suspended_check.isChecked()
         auto_suspend_enabled = self.auto_suspend_check.isChecked()

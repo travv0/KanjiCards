@@ -144,7 +144,6 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         reorder_mode="vocab",
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
-        known_interval_mode=KC.DEFAULT_INTERVAL_MODE,
         auto_suspend_vocab=False,
         auto_suspend_tag="needs_suspend",
     )
@@ -170,7 +169,6 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         reorder_mode="vocab",
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
-        known_interval_mode=KC.DEFAULT_INTERVAL_MODE,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
     )
@@ -192,7 +190,6 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         reorder_mode="vocab",
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
-        known_interval_mode=KC.DEFAULT_INTERVAL_MODE,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
     )
@@ -215,7 +212,6 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         reorder_mode="vocab",
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
-        known_interval_mode=KC.DEFAULT_INTERVAL_MODE,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
     )
@@ -238,7 +234,6 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         reorder_mode="vocab",
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
-        known_interval_mode=KC.DEFAULT_INTERVAL_MODE,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
     )

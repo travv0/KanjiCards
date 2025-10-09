@@ -1,4 +1,5 @@
 import types
+from typing import List
 
 import pytest
 
@@ -180,7 +181,6 @@ def make_config(kanjicards_module, **overrides):
         "reorder_mode": "vocab",
         "ignore_suspended_vocab": False,
         "known_kanji_interval": 21,
-        "known_interval_mode": kanjicards_module.DEFAULT_INTERVAL_MODE,
         "auto_suspend_vocab": False,
         "auto_suspend_tag": "",
     }
@@ -351,7 +351,7 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
     monkeypatch.setattr(
         manager,
         "_load_card_status_for_notes",
-        lambda *args, **kwargs: {101: [(501, 0)]},
+        lambda *args, **kwargs: {101: [(501, 0, 0)]},
     )
     monkeypatch.setattr(
         kanjicards_module,
@@ -403,7 +403,7 @@ def test_update_vocab_suspension_unsuspends_and_clears_tag(manager, kanjicards_m
     monkeypatch.setattr(
         manager,
         "_load_card_status_for_notes",
-        lambda *args, **kwargs: {202: [(601, -1)]},
+        lambda *args, **kwargs: {202: [(601, -1, 2)]},
     )
     monkeypatch.setattr(
         kanjicards_module,
@@ -439,6 +439,55 @@ def test_update_vocab_suspension_unsuspends_and_clears_tag(manager, kanjicards_m
     assert note.flush_count == 1
 
 
+def test_update_vocab_suspension_uses_historical_for_reviewed_vocab(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+    )
+    note = SimpleNote(303, tags=["NeedsSuspend"])
+    collection = types.SimpleNamespace()
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {303: ({"火"}, {"NeedsSuspend"})},
+    )
+
+    def fake_compute(collection, existing, interval, mode):
+        return {"火": mode == "historical"}
+
+    monkeypatch.setattr(manager, "_compute_kanji_reviewed_flags", fake_compute)
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {303: [(701, -1, 2)]},
+    )
+    unsuspended: List[int] = []
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda _collection, card_ids: unsuspended.extend(card_ids),
+    )
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1}
+    assert unsuspended == [701]
+    assert "needssuspend" not in {tag.lower() for tag in note.tags}
+    assert note.flush_count == 1
+
+
 def test_compute_kanji_reviewed_flags(manager, kanjicards_module, monkeypatch):
     calls = []
 
@@ -453,7 +502,7 @@ def test_compute_kanji_reviewed_flags(manager, kanjicards_module, monkeypatch):
         types.SimpleNamespace(),
         existing,
         21,
-        kanjicards_module.DEFAULT_INTERVAL_MODE,
+        "current",
     )
 
     assert result == {"火": True, "水": False, "風": False}
@@ -471,7 +520,7 @@ def test_compute_kanji_reviewed_flags_zero_threshold(manager, kanjicards_module,
         types.SimpleNamespace(),
         {"火": 1},
         0,
-        kanjicards_module.DEFAULT_INTERVAL_MODE,
+        "current",
     )
     assert result == {"火": True}
 
@@ -531,13 +580,13 @@ def test_load_card_status_for_notes(manager, kanjicards_module, monkeypatch):
     def fake_db_all(collection, sql, *params, context=""):
         assert "load_card_status_for_notes" in context
         return [
-            (101, 1, -1),
-            (102, 2, 0),
+            (101, 1, -1, 2),
+            (102, 2, 0, 0),
         ]
 
     monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
     mapping = manager._load_card_status_for_notes(types.SimpleNamespace(), [1, 2])
-    assert mapping == {1: [(101, -1)], 2: [(102, 0)]}
+    assert mapping == {1: [(101, -1, 2)], 2: [(102, 0, 0)]}
 
 
 def test_load_note_active_status(manager, kanjicards_module, monkeypatch):
