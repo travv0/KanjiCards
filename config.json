@@ -27,6 +27,8 @@
   "unsuspended_tag": "kanjicards_unsuspended",
   "reorder_mode": "vocab",
   "ignore_suspended_vocab": false,
+  "known_kanji_interval": 21,
+  "known_interval_mode": "current",
   "auto_suspend_vocab": false,
   "auto_suspend_tag": "kanjicards_unreviewed"
 }

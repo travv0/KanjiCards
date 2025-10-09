@@ -180,6 +180,7 @@ def make_config(kanjicards_module, **overrides):
         "reorder_mode": "vocab",
         "ignore_suspended_vocab": False,
         "known_kanji_interval": 21,
+        "known_interval_mode": kanjicards_module.DEFAULT_INTERVAL_MODE,
         "auto_suspend_vocab": False,
         "auto_suspend_tag": "",
     }
@@ -448,7 +449,12 @@ def test_compute_kanji_reviewed_flags(manager, kanjicards_module, monkeypatch):
     monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
 
     existing = {"火": 1, "水": 2, "風": 3}
-    result = manager._compute_kanji_reviewed_flags(types.SimpleNamespace(), existing, 21)
+    result = manager._compute_kanji_reviewed_flags(
+        types.SimpleNamespace(),
+        existing,
+        21,
+        kanjicards_module.DEFAULT_INTERVAL_MODE,
+    )
 
     assert result == {"火": True, "水": False, "風": False}
     assert calls and calls[0].startswith("compute_kanji_reviewed_flags")
@@ -461,9 +467,42 @@ def test_compute_kanji_reviewed_flags_zero_threshold(manager, kanjicards_module,
         lambda *args, **kwargs: [(1, 1, 5)],
     )
 
-    result = manager._compute_kanji_reviewed_flags(types.SimpleNamespace(), {"火": 1}, 0)
-
+    result = manager._compute_kanji_reviewed_flags(
+        types.SimpleNamespace(),
+        {"火": 1},
+        0,
+        kanjicards_module.DEFAULT_INTERVAL_MODE,
+    )
     assert result == {"火": True}
+
+
+def test_compute_kanji_reviewed_flags_historical_uses_revlog(manager, kanjicards_module, monkeypatch):
+    contexts = []
+
+    def fake_db_all(collection, sql, *params, context=""):
+        contexts.append(context)
+        if "revlog" in context:
+            return [
+                (1, 200),
+                (2, 60),
+            ]
+        return [
+            (1, 0, 30),
+            (2, 1, 50),
+        ]
+
+    monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
+
+    existing = {"火": 1, "水": 2}
+    result = manager._compute_kanji_reviewed_flags(
+        types.SimpleNamespace(),
+        existing,
+        100,
+        "historical",
+    )
+
+    assert result == {"火": True, "水": False}
+    assert any("revlog" in ctx for ctx in contexts)
 
 
 def test_collect_vocab_note_chars_filters(manager, monkeypatch):

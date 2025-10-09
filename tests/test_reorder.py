@@ -226,6 +226,7 @@ def build_environment(kanjicards_module, reorder_mode):
         reorder_mode=reorder_mode,
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
+        known_interval_mode=kanjicards_module.DEFAULT_INTERVAL_MODE,
         auto_suspend_vocab=False,
         auto_suspend_tag="",
     )

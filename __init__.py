@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, Iterator, List, Literal, Optional, Sequence, Set, Tuple, Union
 
 from anki.collection import Collection
 from anki.models import NotetypeDict
@@ -97,6 +97,10 @@ BUCKET_TAG_KEYS: Tuple[str, str, str] = (
     "no_vocab",
 )
 
+IntervalMode = Literal["current", "historical"]
+INTERVAL_MODE_OPTIONS: Tuple[IntervalMode, IntervalMode] = ("current", "historical")
+DEFAULT_INTERVAL_MODE: IntervalMode = "current"
+
 
 def _safe_print(*args: object, **kwargs: Any) -> None:
     try:
@@ -161,6 +165,7 @@ class AddonConfig:
     known_kanji_interval: int
     auto_suspend_vocab: bool
     auto_suspend_tag: str
+    known_interval_mode: IntervalMode = DEFAULT_INTERVAL_MODE
 
 
 @dataclass
@@ -379,6 +384,13 @@ class KanjiVocabSyncManager:
             interval_value = 21
         if interval_value < 0:
             interval_value = 0
+        interval_mode_raw = raw.get("known_interval_mode", DEFAULT_INTERVAL_MODE)
+        if isinstance(interval_mode_raw, str):
+            interval_mode = interval_mode_raw.strip().lower()
+        else:
+            interval_mode = DEFAULT_INTERVAL_MODE
+        if interval_mode not in INTERVAL_MODE_OPTIONS:
+            interval_mode = DEFAULT_INTERVAL_MODE
 
         return AddonConfig(
             vocab_note_types=vocab_cfg,
@@ -398,6 +410,7 @@ class KanjiVocabSyncManager:
             known_kanji_interval=interval_value,
             auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
             auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_unreviewed"),
+            known_interval_mode=interval_mode,
         )
 
     def _serialize_config(self, cfg: AddonConfig) -> Dict[str, Any]:
@@ -423,6 +436,11 @@ class KanjiVocabSyncManager:
             "reorder_mode": cfg.reorder_mode,
             "ignore_suspended_vocab": bool(cfg.ignore_suspended_vocab),
             "known_kanji_interval": int(cfg.known_kanji_interval),
+            "known_interval_mode": (
+                cfg.known_interval_mode
+                if cfg.known_interval_mode in INTERVAL_MODE_OPTIONS
+                else DEFAULT_INTERVAL_MODE
+            ),
             "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
             "auto_suspend_tag": cfg.auto_suspend_tag,
         }
@@ -1948,6 +1966,7 @@ class KanjiVocabSyncManager:
         collection: Collection,
         existing_notes: Dict[str, int],
         min_interval: int,
+        interval_mode: IntervalMode,
     ) -> Dict[str, bool]:
         if not existing_notes:
             return {}
@@ -1960,6 +1979,7 @@ class KanjiVocabSyncManager:
             threshold = 0
         if threshold < 0:
             threshold = 0
+        mode_value: IntervalMode = interval_mode if interval_mode in INTERVAL_MODE_OPTIONS else DEFAULT_INTERVAL_MODE
         rows: List[Tuple[int, int, int]] = []
         for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
             placeholders = ",".join("?" for _ in batch_ids)
@@ -1977,13 +1997,50 @@ class KanjiVocabSyncManager:
                 )
             )
         status_by_note: Dict[int, bool] = {}
+        historical_max_by_note: Dict[int, int] = {}
+        if mode_value == "historical":
+            for batch_index, batch_ids in enumerate(_chunk_sequence(note_ids, SQLITE_MAX_VARIABLES)):
+                placeholders = ",".join("?" for _ in batch_ids)
+                historical_rows = _db_all(
+                    collection,
+                    (
+                        "SELECT cards.nid, "
+                        "MAX(CASE WHEN revlog.ivl > 0 THEN revlog.ivl ELSE 0 END) AS max_revlog_interval "
+                        "FROM cards "
+                        "JOIN revlog ON revlog.cid = cards.id "
+                        f"WHERE cards.nid IN ({placeholders}) "
+                        "GROUP BY cards.nid"
+                    ),
+                    *batch_ids,
+                    context=f"compute_kanji_reviewed_flags/revlog_batch{batch_index}",
+                )
+                for nid, max_revlog_interval in historical_rows:
+                    try:
+                        historical_max_by_note[nid] = int(max_revlog_interval)
+                    except Exception:
+                        historical_max_by_note[nid] = 0
         for nid, reviewed_flag, max_interval in rows:
             reviewed = bool(reviewed_flag)
-            if reviewed and threshold > 0:
+            if mode_value == "historical":
+                interval_value_raw: Optional[int] = historical_max_by_note.get(nid, 0)
                 try:
-                    interval_value = int(max_interval)
+                    interval_value = int(interval_value_raw) if interval_value_raw is not None else 0
                 except Exception:
                     interval_value = 0
+                if interval_value <= 0:
+                    try:
+                        interval_value = int(max_interval)
+                    except Exception:
+                        interval_value = 0
+                if interval_value > 0:
+                    reviewed = True
+            else:
+                interval_value_raw = max_interval
+                try:
+                    interval_value = int(interval_value_raw)
+                except Exception:
+                    interval_value = 0
+            if reviewed and threshold > 0:
                 reviewed = interval_value >= threshold
             status_by_note[nid] = reviewed
         return {char: status_by_note.get(note_id, False) for char, note_id in existing_notes.items()}
@@ -2120,6 +2177,7 @@ class KanjiVocabSyncManager:
             collection,
             existing_notes,
             cfg.known_kanji_interval,
+            cfg.known_interval_mode,
         )
         if force_chars_reviewed:
             for char in force_chars_reviewed:
@@ -2465,6 +2523,17 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         except Exception:
             interval_value = 0
         self.known_interval_spin.setValue(max(0, interval_value))
+        self.known_interval_mode_combo = QComboBox()
+        self.known_interval_mode_combo.addItem("Only current interval must meet threshold", "current")
+        self.known_interval_mode_combo.addItem("Any past interval may meet threshold", "historical")
+        mode_value = (
+            self.config.known_interval_mode
+            if self.config.known_interval_mode in INTERVAL_MODE_OPTIONS
+            else DEFAULT_INTERVAL_MODE
+        )
+        mode_index = self.known_interval_mode_combo.findData(mode_value)
+        if mode_index >= 0:
+            self.known_interval_mode_combo.setCurrentIndex(mode_index)
         self.auto_sync_check = QCheckBox("Run automatically after sync")
         self.auto_sync_check.setChecked(self.config.auto_run_on_sync)
         self.ignore_suspended_check = QCheckBox("Ignore suspended vocab cards")
@@ -2499,6 +2568,7 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         form.addRow("Kanji deck", self.deck_combo)
         form.addRow("", self.realtime_check)
         form.addRow("Known kanji interval (days)", self.known_interval_spin)
+        form.addRow("Interval requirement", self.known_interval_mode_combo)
         form.addRow("", self.auto_sync_check)
         form.addRow("", self.ignore_suspended_check)
         form.addRow("", self.auto_suspend_check)
@@ -2673,6 +2743,10 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         except Exception:
             known_interval = 0
         self.config.known_kanji_interval = max(0, known_interval)
+        mode_value = self.known_interval_mode_combo.currentData()
+        if not isinstance(mode_value, str) or mode_value not in INTERVAL_MODE_OPTIONS:
+            mode_value = DEFAULT_INTERVAL_MODE
+        self.config.known_interval_mode = mode_value
         self.config.auto_run_on_sync = self.auto_sync_check.isChecked()
         self.config.ignore_suspended_vocab = self.ignore_suspended_check.isChecked()
         auto_suspend_enabled = self.auto_suspend_check.isChecked()
