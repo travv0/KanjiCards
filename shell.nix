@@ -13,7 +13,6 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
-    export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
     export PYTHONPATH=$PWD${PYTHONPATH:+:$PYTHONPATH}
   '';
 }
