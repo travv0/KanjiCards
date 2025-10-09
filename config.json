@@ -26,6 +26,8 @@
   "realtime_review": true,
   "unsuspended_tag": "kanjicards_unsuspended",
   "reorder_mode": "vocab",
+  "use_parent_deck_new_order": true,
+  "debug_logging": false,
   "ignore_suspended_vocab": false,
   "known_kanji_interval": 21,
   "auto_suspend_vocab": false,

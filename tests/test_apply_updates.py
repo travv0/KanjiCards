@@ -147,7 +147,9 @@ def manager(kanjicards_module):
     manager._realtime_error_logged = False
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None
+    manager._last_vocab_deck_signature = None
     manager._pending_vocab_sync_marker = None
+    manager._pending_vocab_deck_signature = None
     manager._suppress_next_auto_sync = False
     return manager
 
@@ -179,6 +181,8 @@ def make_config(kanjicards_module, **overrides):
         "realtime_review": False,
         "unsuspended_tag": "unsuspend",
         "reorder_mode": "vocab",
+        "use_parent_deck_new_order": True,
+        "debug_logging": False,
         "ignore_suspended_vocab": False,
         "known_kanji_interval": 21,
         "auto_suspend_vocab": False,
@@ -383,6 +387,63 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
     assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0}
     assert "needssuspend" in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
+
+
+def test_update_vocab_suspension_skips_preexisting_suspensions(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+    )
+    collection = types.SimpleNamespace()
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {303: ({"火"}, set())},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {303: [(701, -1, 0)]},
+    )
+
+    resuspend_calls = []
+
+    def fail_resuspend(*args, **kwargs):
+        resuspend_calls.append(True)
+        return 0
+
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        fail_resuspend,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: pytest.fail("_get_note should not be called"),
+    )
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0}
+    assert not resuspend_calls
 
 
 def test_update_vocab_suspension_unsuspends_and_clears_tag(manager, kanjicards_module, monkeypatch):

@@ -97,6 +97,25 @@ BUCKET_TAG_KEYS: Tuple[str, str, str] = (
     "no_vocab",
 )
 
+try:
+    from anki.consts import (
+        NEW_CARD_GATHER_PRIORITY_DECK,
+        NEW_CARD_GATHER_PRIORITY_LOWEST_POSITION,
+        NEW_CARD_GATHER_PRIORITY_HIGHEST_POSITION,
+        NEW_CARD_GATHER_PRIORITY_RANDOM_NOTES,
+        NEW_CARD_GATHER_PRIORITY_RANDOM_CARDS,
+        NEW_CARD_GATHER_PRIORITY_DECK_THEN_RANDOM_NOTES,
+    )
+except Exception:  # pragma: no cover - fallback for test stubs
+    NEW_CARD_GATHER_PRIORITY_DECK = 0
+    NEW_CARD_GATHER_PRIORITY_LOWEST_POSITION = 1
+    NEW_CARD_GATHER_PRIORITY_HIGHEST_POSITION = 2
+    NEW_CARD_GATHER_PRIORITY_RANDOM_NOTES = 3
+    NEW_CARD_GATHER_PRIORITY_RANDOM_CARDS = 4
+    NEW_CARD_GATHER_PRIORITY_DECK_THEN_RANDOM_NOTES = 5
+
+DEFAULT_NEW_PER_DAY = 9999
+
 
 def _safe_print(*args: object, **kwargs: Any) -> None:
     try:
@@ -157,6 +176,8 @@ class AddonConfig:
     realtime_review: bool
     unsuspended_tag: str
     reorder_mode: str
+    use_parent_deck_new_order: bool
+    debug_logging: bool
     ignore_suspended_vocab: bool
     known_kanji_interval: int
     auto_suspend_vocab: bool
@@ -173,6 +194,7 @@ class KanjiUsageInfo:
     first_new_due: Optional[int] = None
     first_new_order: Optional[int] = None
     vocab_occurrences: int = 0
+    has_new_card: bool = False
 
 
 @dataclass
@@ -208,7 +230,9 @@ class KanjiVocabSyncManager:
         self._debug_enabled = False
         self._last_vocab_sync_mod: Optional[int] = None
         self._last_vocab_sync_count: Optional[int] = None
+        self._last_vocab_deck_signature: Optional[Tuple[Tuple[int, int, int, Optional[int], str], ...]] = None
         self._pending_vocab_sync_marker: Optional[Tuple[int, int]] = None
+        self._pending_vocab_deck_signature: Optional[Tuple[Tuple[int, int, int, Optional[int], str], ...]] = None
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -275,6 +299,7 @@ class KanjiVocabSyncManager:
         if isinstance(data, dict):
             marker_mod = data.get("last_vocab_sync_mod")
             marker_count = data.get("last_vocab_sync_count")
+            signature_raw = data.get("last_vocab_deck_signature")
             try:
                 self._last_vocab_sync_mod = int(marker_mod)
             except Exception:
@@ -283,9 +308,32 @@ class KanjiVocabSyncManager:
                 self._last_vocab_sync_count = int(marker_count)
             except Exception:
                 self._last_vocab_sync_count = None
+            if isinstance(signature_raw, list):
+                try:
+                    signature_parsed = []
+                    for entry in signature_raw:
+                        if not isinstance(entry, (list, tuple)) or len(entry) != 5:
+                            signature_parsed = []
+                            break
+                        deck_id, per_day, gather_priority, parent_id, name = entry
+                        signature_parsed.append(
+                            (
+                                int(deck_id),
+                                int(per_day),
+                                int(gather_priority),
+                                int(parent_id) if parent_id is not None else None,
+                                str(name),
+                            )
+                        )
+                    self._last_vocab_deck_signature = tuple(signature_parsed) if signature_parsed else None
+                except Exception:
+                    self._last_vocab_deck_signature = None
+            else:
+                self._last_vocab_deck_signature = None
             return data
         self._last_vocab_sync_mod = None
         self._last_vocab_sync_count = None
+        self._last_vocab_deck_signature = None
         return {}
 
     def _load_profile_config_or_seed(self, global_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -313,6 +361,13 @@ class KanjiVocabSyncManager:
                 payload["last_vocab_sync_count"] = int(self._last_vocab_sync_count)
             else:
                 payload.pop("last_vocab_sync_count", None)
+            if self._last_vocab_deck_signature is not None:
+                payload["last_vocab_deck_signature"] = [
+                    [deck_id, per_day, gather_priority, parent_id, name]
+                    for deck_id, per_day, gather_priority, parent_id, name in self._last_vocab_deck_signature
+                ]
+            else:
+                payload.pop("last_vocab_deck_signature", None)
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=False)
         except Exception as err:  # noqa: BLE001
@@ -406,6 +461,8 @@ class KanjiVocabSyncManager:
             realtime_review=bool(raw.get("realtime_review", True)),
             unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
             reorder_mode=raw.get("reorder_mode", "vocab"),
+            use_parent_deck_new_order=bool(raw.get("use_parent_deck_new_order", True)),
+            debug_logging=bool(raw.get("debug_logging", False)),
             ignore_suspended_vocab=bool(raw.get("ignore_suspended_vocab", False)),
             known_kanji_interval=interval_value,
             auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
@@ -435,6 +492,8 @@ class KanjiVocabSyncManager:
             "realtime_review": bool(cfg.realtime_review),
             "unsuspended_tag": cfg.unsuspended_tag,
             "reorder_mode": cfg.reorder_mode,
+            "use_parent_deck_new_order": bool(cfg.use_parent_deck_new_order),
+            "debug_logging": bool(cfg.debug_logging),
             "ignore_suspended_vocab": bool(cfg.ignore_suspended_vocab),
             "known_kanji_interval": int(cfg.known_kanji_interval),
             "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
@@ -448,9 +507,12 @@ class KanjiVocabSyncManager:
         global_raw = global_raw_obj if isinstance(global_raw_obj, dict) else {}
         profile_raw = self._load_profile_config_or_seed(global_raw)
         raw = self._merge_config_sources(global_raw, profile_raw)
-        return self._config_from_raw(raw)
+        cfg = self._config_from_raw(raw)
+        self._debug_enabled = bool(cfg.debug_logging)
+        return cfg
 
     def save_config(self, cfg: AddonConfig) -> None:
+        self._debug_enabled = bool(cfg.debug_logging)
         raw = self._serialize_config(cfg)
         self.mw.addonManager.writeConfig(__name__, raw)
         self._write_profile_config(raw)
@@ -653,6 +715,7 @@ class KanjiVocabSyncManager:
 
         marker_count, marker_mod = self._compute_vocab_sync_marker(collection, vocab_models)
         self._pending_vocab_sync_marker = (marker_count, marker_mod)
+        self._pending_vocab_deck_signature = self._compute_deck_signature(collection, vocab_models, cfg)
 
         return stats
 
@@ -691,6 +754,181 @@ class KanjiVocabSyncManager:
             max_mod = 0
         return count, max_mod
 
+    def _compute_deck_signature(
+        self,
+        collection: Collection,
+        vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
+        cfg: AddonConfig,
+    ) -> Tuple[Tuple[int, int, int, Optional[int], str], ...]:
+        decks = getattr(collection, "decks", None)
+        db = getattr(collection, "db", None)
+        if decks is None or db is None:
+            return tuple()
+
+        model_ids = [
+            model["id"]
+            for model, _ in vocab_models
+            if isinstance(model, dict) and isinstance(model.get("id"), int)
+        ]
+        if not model_ids:
+            return tuple()
+
+        placeholders = ",".join("?" for _ in model_ids)
+        try:
+            rows = _db_all(
+                collection,
+                (
+                    "SELECT DISTINCT cards.did FROM cards "
+                    "JOIN notes ON notes.id = cards.nid "
+                    "WHERE notes.mid IN ({}) AND cards.queue = 0"
+                ).format(placeholders),
+                *model_ids,
+                context="compute_deck_signature/deck_ids",
+            )
+        except Exception:
+            rows = None
+
+        deck_ids: Set[int] = set()
+        if rows:
+            for row in rows:
+                if isinstance(row, (list, tuple)) and row:
+                    candidate = row[0]
+                else:
+                    candidate = row
+                try:
+                    deck_id = int(candidate)
+                except Exception:
+                    continue
+                deck_ids.add(deck_id)
+
+        if not deck_ids:
+            return tuple()
+
+        def extract_deck_info(deck_id: int) -> Tuple[int, int, int, Optional[int], str]:
+            deck_dict = None
+            for attr in ("get", "get_legacy"):
+                getter = getattr(decks, attr, None)
+                if callable(getter):
+                    try:
+                        deck_dict = getter(deck_id)
+                    except TypeError:
+                        deck_dict = getter(deck_id, default=False) if attr == "get" else None
+                    except Exception:
+                        deck_dict = None
+                    if deck_dict:
+                        break
+            name = ""
+            if isinstance(deck_dict, dict):
+                candidate_name = deck_dict.get("name")
+                if isinstance(candidate_name, str):
+                    name = candidate_name
+            parent_id: Optional[int] = None
+            if name and "::" in name:
+                parent_name = "::".join(name.split("::")[:-1])
+                try:
+                    resolved_parent = self._lookup_deck_id(collection, parent_name)
+                except Exception:
+                    resolved_parent = None
+                if isinstance(resolved_parent, int) and resolved_parent > 0:
+                    parent_id = resolved_parent
+
+            config: Optional[Dict[str, Any]] = None
+            for attr in (
+                "config_dict_for_deck_id",
+                "configDictForDeckId",
+                "confForDid",
+                "conf_for_did",
+            ):
+                getter = getattr(decks, attr, None)
+                if callable(getter):
+                    try:
+                        candidate = getter(deck_id)
+                    except Exception:
+                        continue
+                    if isinstance(candidate, dict):
+                        config = candidate
+                        break
+
+            per_day = DEFAULT_NEW_PER_DAY
+            gather_priority = NEW_CARD_GATHER_PRIORITY_DECK
+            if isinstance(config, dict):
+                new_conf = config.get("new")
+                if isinstance(new_conf, dict):
+                    per_day_val = None
+                    for key in ("new_per_day", "perDay", "per_day"):
+                        if key in new_conf:
+                            per_day_val = new_conf[key]
+                            break
+                    gather_val = None
+                    for key in (
+                        "new_card_gather_priority",
+                        "gatherPriority",
+                        "gather_priority",
+                    ):
+                        if key in new_conf:
+                            gather_val = new_conf[key]
+                            break
+                    try:
+                        per_day = max(int(per_day_val), 0) if per_day_val is not None else DEFAULT_NEW_PER_DAY
+                    except Exception:
+                        per_day = DEFAULT_NEW_PER_DAY
+                    try:
+                        gather_priority = int(gather_val) if gather_val is not None else NEW_CARD_GATHER_PRIORITY_DECK
+                    except Exception:
+                        gather_priority = NEW_CARD_GATHER_PRIORITY_DECK
+
+            return (
+                int(deck_id),
+                int(per_day),
+                int(gather_priority),
+                int(parent_id) if isinstance(parent_id, int) else None,
+                name,
+            )
+
+        signature_map: Dict[int, Tuple[int, int, int, Optional[int], str]] = {}
+
+        def record_deck_and_parents(deck_id: int) -> None:
+            if deck_id in signature_map:
+                return
+            info = extract_deck_info(deck_id)
+            signature_map[deck_id] = info
+            if not cfg.use_parent_deck_new_order:
+                return
+            current_parent = info[3]
+            visited: Set[int] = set()
+            while isinstance(current_parent, int) and current_parent not in visited:
+                visited.add(current_parent)
+                if current_parent in signature_map:
+                    info_parent = signature_map[current_parent]
+                else:
+                    info_parent = extract_deck_info(current_parent)
+                    signature_map[current_parent] = info_parent
+                current_parent = info_parent[3]
+
+        for deck_id in deck_ids:
+            record_deck_and_parents(deck_id)
+
+        if not signature_map:
+            return tuple()
+
+        ordered = tuple(
+            signature_map[deck_id]
+            for deck_id in sorted(signature_map)
+        )
+        if self._debug_enabled:
+            signature_payload = [
+                {
+                    "deck_id": deck_id,
+                    "per_day": per_day,
+                    "gather_priority": gather_priority,
+                    "parent_id": parent_id,
+                    "name": name,
+                }
+                for deck_id, per_day, gather_priority, parent_id, name in ordered
+            ]
+            self._debug("deck_signature", decks=signature_payload)
+        return ordered
+
     def _have_vocab_notes_changed(self, collection: Collection, cfg: AddonConfig) -> bool:
         if self._last_vocab_sync_mod is None or self._last_vocab_sync_count is None:
             return True
@@ -699,11 +937,28 @@ class KanjiVocabSyncManager:
         except Exception:
             return True
         count, max_mod = self._compute_vocab_sync_marker(collection, vocab_models)
+        signature = self._compute_deck_signature(collection, vocab_models, cfg)
+        changed = False
         if count != self._last_vocab_sync_count:
-            return True
+            changed = True
         if max_mod > self._last_vocab_sync_mod:
-            return True
-        return False
+            changed = True
+        if signature != self._last_vocab_deck_signature:
+            changed = True
+        if self._debug_enabled:
+            self._debug(
+                "vocab_change_check",
+                count=int(count),
+                max_mod=int(max_mod),
+                signature=list(signature),
+                last_signature=list(self._last_vocab_deck_signature or []),
+                changed=changed,
+            )
+        if changed:
+            self._pending_vocab_deck_signature = signature
+        else:
+            self._pending_vocab_deck_signature = None
+        return changed
 
     def _commit_vocab_sync_marker(self, cfg: AddonConfig) -> None:
         if self._pending_vocab_sync_marker is None:
@@ -711,9 +966,12 @@ class KanjiVocabSyncManager:
         count, max_mod = self._pending_vocab_sync_marker
         self._last_vocab_sync_count = int(count)
         self._last_vocab_sync_mod = int(max_mod)
+        if self._pending_vocab_deck_signature is not None:
+            self._last_vocab_deck_signature = self._pending_vocab_deck_signature
         raw = self._serialize_config(cfg)
         self._write_profile_config(raw)
         self._pending_vocab_sync_marker = None
+        self._pending_vocab_deck_signature = None
 
     def _on_reviewer_did_show_question(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
@@ -1304,17 +1562,15 @@ class KanjiVocabSyncManager:
     ) -> Dict[str, KanjiUsageInfo]:
         usage: Dict[str, KanjiUsageInfo] = {}
         review_order = 0
-        new_order = 0
+        fallback_new_counter = 0
+        big = 10**9
         for model, field_indexes in vocab_models:
             if not field_indexes:
                 continue
             sql = (
-                "SELECT notes.id, notes.flds, "
-                "MAX(CASE WHEN cards.type != 0 THEN 1 ELSE 0 END) AS has_reviewed, "
-                "MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due, "
-                "MIN(CASE WHEN cards.type != 0 THEN cards.due END) AS min_review_due "
+                "SELECT notes.id, notes.flds, cards.id, cards.did, cards.queue, cards.type, cards.due "
                 "FROM notes JOIN cards ON cards.nid = notes.id "
-                "WHERE notes.mid = ? GROUP BY notes.id"
+                "WHERE notes.mid = ?"
             )
             rows = _db_all(
                 collection,
@@ -1322,20 +1578,128 @@ class KanjiVocabSyncManager:
                 model["id"],
                 context=f"collect_vocab_usage:{model.get('name')}",
             )
-            rows.sort(key=lambda row: (
-                0 if row[3] is not None else 1,
-                row[3] if row[3] is not None else 0,
-                row[0],
-            ))
+            if not rows:
+                continue
+
+            note_map: Dict[int, Dict[str, Any]] = {}
+            schedule_cards: List[Tuple[int, int, int, Optional[int]]] = []
+            for note_id, flds, card_id, deck_id, queue_value, card_type, due_value in rows:
+                note_entry = note_map.setdefault(
+                    note_id,
+                    {
+                        "flds": flds,
+                        "new_cards": [],
+                        "has_new_card": False,
+                        "reviewed": False,
+                        "min_new_due": None,
+                        "min_review_due": None,
+                    },
+                )
+
+                due_int: Optional[int]
+                if isinstance(due_value, int):
+                    due_int = due_value
+                else:
+                    try:
+                        due_int = int(due_value)
+                    except Exception:
+                        due_int = None
+
+                deck_int: Optional[int]
+                if isinstance(deck_id, int):
+                    deck_int = deck_id
+                else:
+                    try:
+                        deck_int = int(deck_id)
+                    except Exception:
+                        deck_int = None
+
+                queue_int: Optional[int]
+                if isinstance(queue_value, int):
+                    queue_int = queue_value
+                else:
+                    try:
+                        queue_int = int(queue_value)
+                    except Exception:
+                        queue_int = None
+
+                card_type_int: Optional[int]
+                if isinstance(card_type, int):
+                    card_type_int = card_type
+                else:
+                    try:
+                        card_type_int = int(card_type)
+                    except Exception:
+                        card_type_int = None
+
+                is_new_card = False
+                if card_type_int == 0:
+                    is_new_card = True
+                elif card_type_int is None and queue_int == 0:
+                    is_new_card = True
+
+                if (
+                    is_new_card
+                    and deck_int is not None
+                    and queue_int in (0, -1)
+                ):
+                    note_entry["new_cards"].append((card_id, deck_int, due_int))
+                    note_entry["has_new_card"] = True
+                    schedule_cards.append((note_id, card_id, deck_int, due_int))
+                    if due_int is not None:
+                        current_min = note_entry["min_new_due"]
+                        note_entry["min_new_due"] = due_int if current_min is None else min(current_min, due_int)
+
+                if card_type_int is not None and card_type_int != 0:
+                    note_entry["reviewed"] = True
+                    if due_int is not None:
+                        current_review_min = note_entry["min_review_due"]
+                        note_entry["min_review_due"] = (
+                            due_int if current_review_min is None else min(current_review_min, due_int)
+                        )
+
+            schedule_map = self._project_new_card_schedule(
+                collection,
+                schedule_cards,
+                cfg.use_parent_deck_new_order,
+            )
+
+            note_priorities: Dict[int, Tuple[int, int]] = {}
+            for note_id, note_entry in note_map.items():
+                best: Optional[Tuple[int, int]] = None
+                for card_id, _deck_int, _due_int in note_entry["new_cards"]:
+                    schedule = schedule_map.get(card_id)
+                    if schedule is None:
+                        continue
+                    day, position = schedule
+                    if day is None or position is None:
+                        continue
+                    candidate = (int(day), int(position))
+                    if best is None or candidate < best:
+                        best = candidate
+                if best is not None:
+                    note_priorities[note_id] = best
 
             active_map: Dict[int, bool] = {}
             auto_suspend_tag = cfg.auto_suspend_tag.strip()
             auto_suspend_tag_lower = auto_suspend_tag.lower()
-            if cfg.ignore_suspended_vocab and rows:
-                note_ids = [row[0] for row in rows]
+            if cfg.ignore_suspended_vocab and note_map:
+                note_ids = list(note_map.keys())
                 active_map = self._load_note_active_status(collection, note_ids)
 
-            for note_id, flds, has_reviewed, min_new_due, min_review_due in rows:
+            note_items = list(note_map.items())
+
+            def _note_sort_key(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, int, int]:
+                note_id, entry = item
+                priority = note_priorities.get(note_id)
+                has_priority = 0 if priority is not None else 1
+                min_new_due = entry["min_new_due"]
+                due_value = min_new_due if isinstance(min_new_due, int) else big
+                return (has_priority, due_value, note_id)
+
+            note_items.sort(key=_note_sort_key)
+
+            for note_id, note_entry in note_items:
                 if cfg.ignore_suspended_vocab:
                     has_active = active_map.get(note_id, False)
                     if not has_active:
@@ -1348,32 +1712,38 @@ class KanjiVocabSyncManager:
                         note_tags_lower = {tag.lower() for tag in getattr(note_obj, "tags", [])}
                         if auto_suspend_tag_lower not in note_tags_lower:
                             continue
-                reviewed_flag = bool(has_reviewed)
+
+                reviewed_flag = bool(note_entry["reviewed"])
                 review_rank = None
                 if reviewed_flag:
                     review_rank = review_order
                     review_order += 1
 
-                new_due_value: Optional[int] = None
-                if min_new_due is not None:
-                    try:
-                        new_due_value = int(min_new_due)
-                    except Exception:
-                        new_due_value = None
+                review_due_value: Optional[int] = note_entry["min_review_due"]
+                new_due_value: Optional[int] = note_entry["min_new_due"]
 
-                new_rank = None
-                if new_due_value is not None:
-                    new_rank = new_order
-                    new_order += 1
+                priority = note_priorities.get(note_id)
+                projected_day: Optional[int] = None
+                projected_rank: Optional[int] = None
+                if priority is not None:
+                    projected_day, projected_rank = priority
 
-                review_due_value: Optional[int] = None
-                if min_review_due is not None:
-                    try:
-                        review_due_value = int(min_review_due)
-                    except Exception:
-                        review_due_value = None
+                new_due_metric: Optional[int] = None
+                new_rank_value: Optional[int] = None
 
-                fields = flds.split("\x1f")
+                if projected_day is not None:
+                    new_due_metric = int(projected_day)
+                if projected_rank is not None:
+                    new_rank_value = int(projected_rank)
+
+                if new_due_metric is None and isinstance(new_due_value, int):
+                    new_due_metric = new_due_value
+
+                if new_rank_value is None and note_entry["has_new_card"]:
+                    new_rank_value = fallback_new_counter
+                    fallback_new_counter += 1
+
+                fields = note_entry["flds"].split("\x1f")
                 seen_in_note: Set[str] = set()
                 for field_index in field_indexes:
                     if field_index >= len(fields):
@@ -1390,27 +1760,381 @@ class KanjiVocabSyncManager:
                         if char not in seen_in_note:
                             info.vocab_occurrences += 1
                             seen_in_note.add(char)
+                        if note_entry.get("has_new_card"):
+                            info.has_new_card = True
                         if reviewed_flag:
                             info.reviewed = True
                             if review_rank is not None and (
-                                info.first_review_order is None
-                                or review_rank < info.first_review_order
+                                info.first_review_order is None or review_rank < info.first_review_order
                             ):
                                 info.first_review_order = review_rank
-                            if review_due_value is not None and (
-                                info.first_review_due is None
-                                or review_due_value < info.first_review_due
+                            if isinstance(review_due_value, int) and (
+                                info.first_review_due is None or review_due_value < info.first_review_due
                             ):
                                 info.first_review_due = review_due_value
-                        if new_due_value is not None and (
-                            info.first_new_due is None or new_due_value < info.first_new_due
+                        if new_due_metric is not None and (
+                            info.first_new_due is None or new_due_metric < info.first_new_due
                         ):
-                            info.first_new_due = new_due_value
-                        if new_rank is not None and (
-                            info.first_new_order is None or new_rank < info.first_new_order
+                            info.first_new_due = new_due_metric
+                        if new_rank_value is not None and (
+                            info.first_new_order is None or new_rank_value < info.first_new_order
                         ):
-                            info.first_new_order = new_rank
+                            info.first_new_order = new_rank_value
+        if self._debug_enabled:
+            scheduled = sum(1 for info in usage.values() if info.first_new_due is not None)
+            reviewed = sum(1 for info in usage.values() if info.reviewed)
+            sample_entries = []
+            new_vocab_count = 0
+            new_vocab_sample: List[Dict[str, object]] = []
+            if scheduled:
+                for char, info in usage.items():
+                    if info.first_new_due is None:
+                        continue
+                    sample_entries.append(
+                        {
+                            "char": char,
+                            "first_new_due": info.first_new_due,
+                            "first_new_order": info.first_new_order,
+                            "reviewed": info.reviewed,
+                        }
+                    )
+                    if not info.reviewed:
+                        new_vocab_count += 1
+                        if len(new_vocab_sample) < 5:
+                            new_vocab_sample.append(
+                                {
+                                    "char": char,
+                                    "first_new_due": info.first_new_due,
+                                    "first_new_order": info.first_new_order,
+                                }
+                            )
+                    if len(sample_entries) >= 5 and len(new_vocab_sample) >= 5:
+                        break
+            self._debug(
+                "usage_summary",
+                total=len(usage),
+                with_schedule=scheduled,
+                with_review=reviewed,
+                new_vocab_scheduled=new_vocab_count,
+                sample=sample_entries,
+                new_vocab_sample=new_vocab_sample,
+            )
         return usage
+
+    def _project_new_card_schedule(
+        self,
+        collection: Collection,
+        cards: Sequence[Tuple[int, int, int, Optional[int]]],
+        use_parent_deck: bool,
+    ) -> Dict[int, Tuple[Optional[int], Optional[int]]]:
+        if not cards:
+            return {}
+
+        decks = getattr(collection, "decks", None)
+        results: Dict[int, Tuple[Optional[int], Optional[int]]] = {}
+
+        @dataclass
+        class DeckInfo:
+            deck_id: int
+            name: str
+            new_per_day: int
+            gather_priority: int
+            parent_id: Optional[int]
+
+        deck_info_cache: Dict[int, DeckInfo] = {}
+        root_cache: Dict[int, int] = {}
+        path_cache: Dict[Tuple[int, int], List[int]] = {}
+
+        def get_deck_info(deck_id: int) -> DeckInfo:
+            cached = deck_info_cache.get(deck_id)
+            if cached is not None:
+                return cached
+
+            deck_name = f"{deck_id}"
+            parent_id: Optional[int] = None
+            gather_priority = NEW_CARD_GATHER_PRIORITY_DECK
+            per_day = DEFAULT_NEW_PER_DAY
+
+            deck_dict: Optional[Dict[str, Any]] = None
+            if decks is not None:
+                get_fn = getattr(decks, "get", None)
+                if callable(get_fn):
+                    try:
+                        deck_dict = get_fn(deck_id, default=False)
+                    except TypeError:
+                        deck_dict = get_fn(deck_id)
+                    except Exception:
+                        deck_dict = None
+            if isinstance(deck_dict, dict):
+                name_val = deck_dict.get("name")
+                if isinstance(name_val, str) and name_val:
+                    deck_name = name_val
+
+            config: Optional[Dict[str, Any]] = None
+            if decks is not None:
+                for attr in (
+                    "config_dict_for_deck_id",
+                    "configDictForDeckId",
+                    "confForDid",
+                    "conf_for_did",
+                ):
+                    getter = getattr(decks, attr, None)
+                    if callable(getter):
+                        try:
+                            config_candidate = getter(deck_id)
+                        except Exception:
+                            continue
+                        if isinstance(config_candidate, dict):
+                            config = config_candidate
+                            break
+            new_conf = config.get("new") if isinstance(config, dict) else None
+            if isinstance(new_conf, dict):
+                per_day_val = None
+                for key in ("new_per_day", "perDay", "per_day"):
+                    if key in new_conf:
+                        per_day_val = new_conf.get(key)
+                        break
+                if per_day_val is not None:
+                    try:
+                        per_day = max(int(per_day_val), 0)
+                    except Exception:
+                        per_day = DEFAULT_NEW_PER_DAY
+                gather_val = None
+                for key in (
+                    "new_card_gather_priority",
+                    "gatherPriority",
+                    "gather_priority",
+                ):
+                    if key in new_conf:
+                        gather_val = new_conf.get(key)
+                        break
+                if gather_val is not None:
+                    try:
+                        gather_priority = int(gather_val)
+                    except Exception:
+                        gather_priority = NEW_CARD_GATHER_PRIORITY_DECK
+
+            if decks is not None and "::" in deck_name:
+                parent_name = "::".join(deck_name.split("::")[:-1])
+                if parent_name:
+                    try:
+                        parent_id = self._lookup_deck_id(collection, parent_name)
+                    except Exception:
+                        parent_id = None
+
+            info = DeckInfo(
+                deck_id=deck_id,
+                name=str(deck_name),
+                new_per_day=per_day if isinstance(per_day, int) and per_day >= 0 else DEFAULT_NEW_PER_DAY,
+                gather_priority=gather_priority,
+                parent_id=parent_id,
+            )
+            deck_info_cache[deck_id] = info
+            return info
+
+        def resolve_root(deck_id: int) -> int:
+            if not use_parent_deck:
+                return deck_id
+            cached_root = root_cache.get(deck_id)
+            if cached_root is not None:
+                return cached_root
+            current = deck_id
+            root = deck_id
+            visited: Set[int] = set()
+            while True:
+                info = get_deck_info(current)
+                parent_id = info.parent_id
+                if parent_id is None or parent_id in visited:
+                    break
+                parent_info = get_deck_info(parent_id)
+                if parent_info.new_per_day <= 0:
+                    break
+                root = parent_id
+                visited.add(parent_id)
+                current = parent_id
+            root_cache[deck_id] = root
+            return root
+
+        def resolve_path(deck_id: int, root_id: int) -> List[int]:
+            key = (deck_id, root_id)
+            cached_path = path_cache.get(key)
+            if cached_path is not None:
+                return cached_path
+            path: List[int] = []
+            current = deck_id
+            visited: Set[int] = set()
+            while True:
+                path.append(current)
+                if current == root_id:
+                    break
+                info = get_deck_info(current)
+                parent_id = info.parent_id
+                if parent_id is None or parent_id in visited:
+                    if root_id not in path:
+                        path.append(root_id)
+                    break
+                visited.add(parent_id)
+                current = parent_id
+            path_cache[key] = path
+            return path
+
+        cards_by_root: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        for note_id, card_id, deck_id, due_value in cards:
+            try:
+                deck_int = int(deck_id)
+            except Exception:
+                continue
+            info = get_deck_info(deck_int)
+            root_id = resolve_root(deck_int)
+            due_int: int
+            if isinstance(due_value, int):
+                due_int = max(due_value, 0)
+            else:
+                try:
+                    due_int = max(int(due_value), 0)
+                except Exception:
+                    due_int = DEFAULT_NEW_PER_DAY
+            path = resolve_path(deck_int, root_id)
+            cards_by_root[root_id].append(
+                {
+                    "note_id": note_id,
+                    "card_id": card_id,
+                    "deck_id": deck_int,
+                    "due": due_int,
+                    "path": path,
+                }
+            )
+
+        for root_id, root_cards in cards_by_root.items():
+            if not root_cards:
+                continue
+            deck_ids: Set[int] = set()
+            for card in root_cards:
+                deck_ids.update(card["path"])
+
+            if self._debug_enabled:
+                root_info = get_deck_info(root_id)
+                self._debug(
+                    "schedule_root",
+                    root_deck=root_id,
+                    deck_name=root_info.name,
+                    card_count=len(root_cards),
+                    limits={
+                        deck_id: get_deck_info(deck_id).new_per_day
+                        for deck_id in sorted(deck_ids)
+                    },
+                )
+
+            deck_names = {
+                deck_id: get_deck_info(deck_id).name.lower()
+                for deck_id in deck_ids
+            }
+            sorted_decks = sorted(
+                deck_ids,
+                key=lambda did: (deck_names.get(did, ""), did),
+            )
+            deck_order_map = {deck_id: index for index, deck_id in enumerate(sorted_decks)}
+
+            gather_priority = get_deck_info(root_id).gather_priority
+            if gather_priority in {
+                NEW_CARD_GATHER_PRIORITY_DECK,
+                NEW_CARD_GATHER_PRIORITY_DECK_THEN_RANDOM_NOTES,
+            }:
+                mode = "deck"
+            elif gather_priority == NEW_CARD_GATHER_PRIORITY_HIGHEST_POSITION:
+                mode = "due_desc"
+            else:
+                mode = "due"
+
+            if mode == "deck":
+                def order_key(card: Dict[str, Any]) -> Tuple[int, int, int]:
+                    return (
+                        deck_order_map.get(card["deck_id"], 0),
+                        card["due"],
+                        card["card_id"],
+                    )
+            elif mode == "due_desc":
+                def order_key(card: Dict[str, Any]) -> Tuple[int, int, int]:
+                    return (
+                        -card["due"],
+                        deck_order_map.get(card["deck_id"], 0),
+                        card["card_id"],
+                    )
+            else:
+                def order_key(card: Dict[str, Any]) -> Tuple[int, int, int]:
+                    return (
+                        card["due"],
+                        deck_order_map.get(card["deck_id"], 0),
+                        card["card_id"],
+                    )
+
+            ordered_cards = sorted(root_cards, key=order_key)
+            limits_template = {
+                deck_id: max(get_deck_info(deck_id).new_per_day, 0)
+                for deck_id in deck_ids
+            }
+
+            remaining: List[Dict[str, Any]] = list(ordered_cards)
+            day = 0
+            position = 0
+
+            while remaining:
+                limits = {
+                    deck_id: limits_template.get(deck_id, DEFAULT_NEW_PER_DAY)
+                    for deck_id in deck_ids
+                }
+                if limits.get(root_id, 0) <= 0:
+                    for card in remaining:
+                        results[card["card_id"]] = (None, None)
+                    break
+
+                assigned_this_day = False
+                next_remaining: List[Dict[str, Any]] = []
+
+                for card in remaining:
+                    path = card["path"]
+                    if all(limits.get(deck_segment, 0) > 0 for deck_segment in path):
+                        assigned_this_day = True
+                        results[card["card_id"]] = (day, position)
+                        position += 1
+                        for deck_segment in path:
+                            limits[deck_segment] = max(limits.get(deck_segment, 0) - 1, 0)
+                    else:
+                        next_remaining.append(card)
+
+                if not assigned_this_day:
+                    for card in next_remaining:
+                        results.setdefault(card["card_id"], (None, None))
+                    break
+
+                remaining = next_remaining
+                day += 1
+
+            if self._debug_enabled and results:
+                deck_day_counts: Dict[int, Dict[int, int]] = {}
+                for card in root_cards:
+                    assigned = results.get(card["card_id"])
+                    if not assigned or assigned[0] is None:
+                        continue
+                    day_value = int(assigned[0])
+                    per_deck = deck_day_counts.setdefault(card["deck_id"], {})
+                    per_deck[day_value] = per_deck.get(day_value, 0) + 1
+                if deck_day_counts:
+                    summary = {}
+                    for deck_id, counts in deck_day_counts.items():
+                        info = get_deck_info(deck_id)
+                        summary[deck_id] = {
+                            "name": info.name,
+                            "per_day_limit": info.new_per_day,
+                            "counts": {day_value: counts[day_value] for day_value in sorted(counts)},
+                        }
+                    self._debug(
+                        "schedule_summary",
+                        root_deck=root_id,
+                        decks=summary,
+                    )
+
+        return results
 
     def _notify_summary(self, stats: Dict[str, object]) -> None:
         try:
@@ -1686,6 +2410,13 @@ class KanjiVocabSyncManager:
         )
         if not rows:
             return {"cards_reordered": 0, "bucket_tags_updated": 0}
+        if self._debug_enabled:
+            self._debug(
+                "reorder_start",
+                mode=mode,
+                card_count=len(rows),
+                use_parent_limits=bool(cfg.use_parent_deck_new_order),
+            )
 
         bucket_tag_map = {
             0: cfg.bucket_tags.get("reviewed_vocab", "").strip(),
@@ -1696,6 +2427,9 @@ class KanjiVocabSyncManager:
         apply_bucket_tags = bool(active_bucket_tags)
 
         entries: List[Tuple[Tuple, int, int, int, int, int, int]] = []
+        card_decks: Dict[int, int] = {}
+        deck_name_cache: Dict[int, str] = {}
+        sample_meta: Dict[int, Dict[str, object]] = {}
         for card_id, note_id, due_value, deck_id, original_mod, original_usn, flds in rows:
             fields = flds.split("\x1f")
             if kanji_field_index >= len(fields):
@@ -1725,13 +2459,88 @@ class KanjiVocabSyncManager:
                 has_vocab,
             )
             entries.append((key, card_id, due_value, original_mod, original_usn, note_id, bucket_id))
+            sample_meta[card_id] = {
+                "kanji": kanji_char,
+                "first_new_due": info.first_new_due,
+                "first_new_order": info.first_new_order,
+                "reviewed": info.reviewed,
+                "freq": freq,
+            }
+            try:
+                deck_int = int(deck_id)
+            except Exception:
+                deck_int = None
+            if deck_int is not None:
+                card_decks[int(card_id)] = deck_int
+                if deck_int not in deck_name_cache and self._debug_enabled:
+                    deck_dict = None
+                    decks = getattr(collection, "decks", None)
+                    getter = getattr(decks, "get", None) if decks is not None else None
+                    if callable(getter):
+                        try:
+                            deck_dict = getter(deck_int)
+                        except TypeError:
+                            deck_dict = getter(deck_int, default=False)
+                        except Exception:
+                            deck_dict = None
+                    name = ""
+                    if isinstance(deck_dict, dict):
+                        name_val = deck_dict.get("name")
+                        if isinstance(name_val, str):
+                            name = name_val
+                    deck_name_cache[deck_int] = name
+            try:
+                card_decks[int(card_id)] = deck_int if deck_int is not None else int(deck_id)
+            except Exception:
+                continue
 
         if not entries:
             return {"cards_reordered": 0, "bucket_tags_updated": 0}
 
+        scheduled_cards = sum(
+            1 for meta in sample_meta.values() if meta.get("first_new_due") is not None
+        ) if self._debug_enabled else 0
+
         now = intTime()
         usn = collection.usn()
         entries.sort(key=lambda item: item[0])
+        if self._debug_enabled:
+            sample = []
+            bucket_samples: Dict[int, List[Dict[str, object]]] = {}
+            for entry in entries[:10]:
+                deck_id = card_decks.get(entry[1])
+                deck_name = deck_name_cache.get(deck_id, "") if deck_id is not None else ""
+                sample_data = {
+                    "key": entry[0],
+                    "card_id": entry[1],
+                    "deck_id": deck_id,
+                    "deck_name": deck_name,
+                    "orig_due": entry[2],
+                }
+                sample_data.update(sample_meta.get(entry[1], {}))
+                sample.append(sample_data)
+            for key, card_id, original_due, _mod, _usn, _note_id, bucket_id in entries:
+                if len(bucket_samples.setdefault(bucket_id, [])) >= 10:
+                    continue
+                deck_id = card_decks.get(card_id)
+                deck_name = deck_name_cache.get(deck_id, "") if deck_id is not None else ""
+                bucket_meta = {
+                    "card_id": card_id,
+                    "deck_id": deck_id,
+                    "deck_name": deck_name,
+                    "orig_due": original_due,
+                }
+                bucket_meta.update(sample_meta.get(card_id, {}))
+                bucket_meta["key"] = key
+                bucket_samples[bucket_id].append(bucket_meta)
+            self._debug(
+                "reorder_sample",
+                sample=sample,
+                scheduled_cards=scheduled_cards,
+                total_cards=len(entries),
+            )
+            if bucket_samples:
+                self._debug("reorder_buckets", buckets=bucket_samples)
         processed_notes: Set[int] = set()
         reordered_cards = 0
         bucket_updates = 0
@@ -1775,10 +2584,17 @@ class KanjiVocabSyncManager:
                 ):
                     bucket_updates += 1
 
-        return {
+        result = {
             "cards_reordered": reordered_cards,
             "bucket_tags_updated": bucket_updates,
         }
+        if self._debug_enabled:
+            self._debug(
+                "reorder_complete",
+                cards_reordered=reordered_cards,
+                bucket_updates=bucket_updates,
+            )
+        return result
 
     def _build_reorder_key(
         self,
@@ -1800,6 +2616,8 @@ class KanjiVocabSyncManager:
         has_frequency = frequency is not None
         freq_value = frequency if has_frequency else big
 
+        has_new_presence = info.first_new_due is not None or info.has_new_card
+
         if has_vocab and info.reviewed:
             vocab_tuple: Tuple = (
                 0,
@@ -1811,7 +2629,8 @@ class KanjiVocabSyncManager:
                 due_sort,
                 card_id,
             )
-        elif has_vocab:
+            bucket_id = 0
+        elif has_vocab and has_new_presence:
             vocab_tuple = (
                 1,
                 new_due,
@@ -1820,6 +2639,16 @@ class KanjiVocabSyncManager:
                 review_order,
                 card_id,
             )
+            bucket_id = 1
+        elif has_vocab:
+            vocab_tuple = (
+                2,
+                0 if has_frequency else 1,
+                freq_value,
+                due_sort,
+                card_id,
+            )
+            bucket_id = 2
         else:
             vocab_tuple = (
                 2,
@@ -1828,8 +2657,7 @@ class KanjiVocabSyncManager:
                 due_sort,
                 card_id,
             )
-
-        bucket_id = int(vocab_tuple[0])
+            bucket_id = 2
 
         vocab_count = info.vocab_occurrences if has_vocab else 0
 
@@ -2261,18 +3089,13 @@ class KanjiVocabSyncManager:
                         suspended_count = _resuspend_note_cards(collection, note_obj_local)
                         if suspended_count > 0:
                             stats["vocab_suspended"] += suspended_count
-                        existing_lower = {value.lower() for value in note_obj_local.tags}
-                        if tag_lower not in existing_lower:
-                            _add_tag(note_obj_local, tag)
-                            changed = True
-                            note_has_tag = True
-                    elif not note_has_tag:
-                        note_obj_local = ensure_note()
-                        existing_lower = {value.lower() for value in note_obj_local.tags}
-                        if tag_lower not in existing_lower:
-                            _add_tag(note_obj_local, tag)
-                            changed = True
-                            note_has_tag = True
+                            existing_lower = {value.lower() for value in note_obj_local.tags}
+                            if tag_lower not in existing_lower:
+                                _add_tag(note_obj_local, tag)
+                                changed = True
+                                note_has_tag = True
+                    else:
+                        continue
                 else:
                     if note_has_tag:
                         note_obj_local = ensure_note()
@@ -2613,6 +3436,10 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         index = self.reorder_combo.findData(current_mode)
         if index >= 0:
             self.reorder_combo.setCurrentIndex(index)
+        self.use_parent_deck_check = QCheckBox("Respect parent deck new limits")
+        self.use_parent_deck_check.setChecked(self.config.use_parent_deck_new_order)
+        self.debug_logging_check = QCheckBox("Write debug log (kanjicards_debug.log)")
+        self.debug_logging_check.setChecked(self.config.debug_logging)
         self.bucket_reviewed_tag_edit = QLineEdit(self.config.bucket_tags.get("reviewed_vocab", ""))
         self.bucket_unreviewed_tag_edit = QLineEdit(self.config.bucket_tags.get("unreviewed_vocab", ""))
         self.bucket_no_vocab_tag_edit = QLineEdit(self.config.bucket_tags.get("no_vocab", ""))
@@ -2633,6 +3460,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         form.addRow("", self.resuspend_reviewed_check)
         form.addRow("Below-threshold vocab tag", self.low_interval_vocab_tag_edit)
         form.addRow("Order new kanji cards", self.reorder_combo)
+        form.addRow("", self.use_parent_deck_check)
+        form.addRow("", self.debug_logging_check)
         form.addRow("Reviewed vocab bucket tag", self.bucket_reviewed_tag_edit)
         form.addRow("Unreviewed vocab bucket tag", self.bucket_unreviewed_tag_edit)
         form.addRow("No vocab bucket tag", self.bucket_no_vocab_tag_edit)
@@ -2813,6 +3642,8 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         self.config.auto_suspend_tag = auto_suspend_tag
         self.config.resuspend_reviewed_low_interval = self.resuspend_reviewed_check.isChecked()
         self.config.reorder_mode = self.reorder_combo.currentData() or "vocab"
+        self.config.use_parent_deck_new_order = self.use_parent_deck_check.isChecked()
+        self.config.debug_logging = self.debug_logging_check.isChecked()
         self.config.bucket_tags = {
             "reviewed_vocab": self.bucket_reviewed_tag_edit.text().strip(),
             "unreviewed_vocab": self.bucket_unreviewed_tag_edit.text().strip(),

@@ -88,7 +88,9 @@ def real_env(tmp_path_factory):
     manager._debug_enabled = False
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None
+    manager._last_vocab_deck_signature = None
     manager._pending_vocab_sync_marker = None
+    manager._pending_vocab_deck_signature = None
     manager._suppress_next_auto_sync = False
 
     aqt.mw = manager.mw
@@ -142,6 +144,8 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         realtime_review=False,
         unsuspended_tag="unsuspended",
         reorder_mode="vocab",
+        use_parent_deck_new_order=True,
+        debug_logging=False,
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
         auto_suspend_vocab=False,
@@ -169,6 +173,8 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         realtime_review=False,
         unsuspended_tag="",
         reorder_mode="vocab",
+        use_parent_deck_new_order=True,
+        debug_logging=False,
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
         auto_suspend_vocab=False,
@@ -192,6 +198,8 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         realtime_review=False,
         unsuspended_tag="",
         reorder_mode="vocab",
+        use_parent_deck_new_order=True,
+        debug_logging=False,
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
         auto_suspend_vocab=False,
@@ -216,6 +224,8 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         realtime_review=False,
         unsuspended_tag="",
         reorder_mode="vocab",
+        use_parent_deck_new_order=True,
+        debug_logging=False,
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
         auto_suspend_vocab=False,
@@ -240,6 +250,8 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         realtime_review=False,
         unsuspended_tag="",
         reorder_mode="vocab",
+        use_parent_deck_new_order=True,
+        debug_logging=False,
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
         auto_suspend_vocab=False,

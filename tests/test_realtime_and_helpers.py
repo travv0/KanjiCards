@@ -59,7 +59,9 @@ def manager(kanjicards_module):
     manager._realtime_error_logged = False
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None
+    manager._last_vocab_deck_signature = None
     manager._pending_vocab_sync_marker = None
+    manager._pending_vocab_deck_signature = None
     manager._suppress_next_auto_sync = False
     return manager
 
@@ -91,6 +93,8 @@ def make_config(kanjicards_module, **overrides):
         "realtime_review": True,
         "unsuspended_tag": "",
         "reorder_mode": "vocab",
+        "use_parent_deck_new_order": True,
+        "debug_logging": False,
         "ignore_suspended_vocab": False,
         "known_kanji_interval": 21,
         "auto_suspend_vocab": False,

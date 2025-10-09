@@ -125,9 +125,12 @@ class FakeCollection:
 def build_environment(kanjicards_module, reorder_mode):
     manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
     manager.mw = types.SimpleNamespace()
+    manager._debug_enabled = False
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None
+    manager._last_vocab_deck_signature = None
     manager._pending_vocab_sync_marker = None
+    manager._pending_vocab_deck_signature = None
     manager._suppress_next_auto_sync = False
 
     kanji_model = {
@@ -224,6 +227,8 @@ def build_environment(kanjicards_module, reorder_mode):
         realtime_review=False,
         unsuspended_tag="",
         reorder_mode=reorder_mode,
+        use_parent_deck_new_order=True,
+        debug_logging=False,
         ignore_suspended_vocab=False,
         known_kanji_interval=21,
         auto_suspend_vocab=False,
