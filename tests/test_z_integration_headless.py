@@ -125,6 +125,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         "kunyomi": "Kunyomi",
         "onyomi": "Onyomi",
         "frequency": "Frequency",
+        "scheduling_info": "",
     }
     cfg = KC.AddonConfig(
         vocab_note_types=[
@@ -148,6 +149,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         auto_suspend_tag="needs_suspend",
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
+        store_scheduling_info=False,
     )
 
     kanji_model_resolved, field_indexes, kanji_field_index = manager._get_kanji_model_context(col, cfg)
@@ -175,6 +177,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         auto_suspend_tag="",
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
+        store_scheduling_info=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, bad_cfg)
@@ -198,6 +201,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         auto_suspend_tag="",
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
+        store_scheduling_info=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, missing_cfg)
@@ -222,6 +226,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         auto_suspend_tag="",
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
+        store_scheduling_info=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, bad_field_cfg)
@@ -246,6 +251,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         auto_suspend_tag="",
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
+        store_scheduling_info=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, missing_field_cfg)

@@ -41,7 +41,7 @@ def test_normalize_kanji_fields_populates_defaults(manager):
     assert normalized["definition"] == ""
     assert normalized["stroke_count"] == "4"
     assert normalized["extra"] == "7"
-    for required in ("kunyomi", "onyomi", "frequency"):
+    for required in ("kunyomi", "onyomi", "frequency", "scheduling_info"):
         assert required in normalized
 
 
@@ -84,6 +84,7 @@ def test_config_roundtrip(manager, kanjicards_module):
         "auto_suspend_tag": "auto_suspend",
         "resuspend_reviewed_low_interval": True,
         "low_interval_vocab_tag": "needs_interval",
+        "store_scheduling_info": True,
     }
     cfg = manager._config_from_raw(raw)
     assert len(cfg.vocab_note_types) == 2
@@ -92,9 +93,11 @@ def test_config_roundtrip(manager, kanjicards_module):
     serialized = manager._serialize_config(cfg)
     assert serialized["existing_tag"] == "has_vocab_kanji"
     assert serialized["kanji_note_type"]["fields"]["kanji"] == "Character"
+    assert serialized["kanji_note_type"]["fields"].get("scheduling_info", "") == ""
     assert serialized["bucket_tags"]["reviewed_vocab"] == "rev"
     assert serialized["resuspend_reviewed_low_interval"] is True
     assert serialized["low_interval_vocab_tag"] == "needs_interval"
+    assert serialized["store_scheduling_info"] is True
 
 
 def test_config_from_raw_missing_field(manager, kanjicards_module):

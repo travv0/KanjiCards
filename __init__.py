@@ -56,6 +56,16 @@ except ImportError:
     from aqt.utils import showWarning as show_warning
     from aqt.utils import tooltip
 
+try:
+    from aqt.utils import askUser
+except ImportError:
+    askUser = None  # type: ignore[assignment]
+
+try:
+    from aqt.qt import QMessageBox
+except ImportError:
+    QMessageBox = None  # type: ignore[assignment]
+
 try:  # PyQt6-style enums
     SINGLE_SELECTION = QAbstractItemView.SelectionMode.SingleSelection
     NO_SELECTION = QAbstractItemView.SelectionMode.NoSelection
@@ -97,6 +107,8 @@ BUCKET_TAG_KEYS: Tuple[str, str, str] = (
     "unreviewed_vocab",
     "no_vocab",
 )
+
+SCHEDULING_FIELD_DEFAULT_NAME = "KanjiCards Scheduling Info"
 
 
 def _safe_print(*args: object, **kwargs: Any) -> None:
@@ -165,6 +177,7 @@ class AddonConfig:
     auto_suspend_tag: str
     resuspend_reviewed_low_interval: bool
     low_interval_vocab_tag: str
+    store_scheduling_info: bool
 
 
 @dataclass
@@ -354,7 +367,7 @@ class KanjiVocabSyncManager:
                     result[key] = ""
                 else:
                     result[key] = str(value)
-        for logical_name in ("kanji", "definition", "stroke_count", "kunyomi", "onyomi", "frequency"):
+        for logical_name in ("kanji", "definition", "stroke_count", "kunyomi", "onyomi", "frequency", "scheduling_info"):
             result.setdefault(logical_name, "")
         return result
 
@@ -434,6 +447,7 @@ class KanjiVocabSyncManager:
             auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_new"),
             resuspend_reviewed_low_interval=bool(raw.get("resuspend_reviewed_low_interval", False)),
             low_interval_vocab_tag=raw.get("low_interval_vocab_tag", ""),
+            store_scheduling_info=bool(raw.get("store_scheduling_info", False)),
         )
 
     def _serialize_config(self, cfg: AddonConfig) -> Dict[str, Any]:
@@ -467,6 +481,7 @@ class KanjiVocabSyncManager:
             "auto_suspend_tag": cfg.auto_suspend_tag,
             "resuspend_reviewed_low_interval": bool(cfg.resuspend_reviewed_low_interval),
             "low_interval_vocab_tag": cfg.low_interval_vocab_tag,
+            "store_scheduling_info": bool(cfg.store_scheduling_info),
         }
 
     def _hash_config(self, cfg: AddonConfig) -> str:
@@ -1343,8 +1358,6 @@ class KanjiVocabSyncManager:
         cfg: AddonConfig,
     ) -> Dict[str, KanjiUsageInfo]:
         usage: Dict[str, KanjiUsageInfo] = {}
-        review_order = 0
-        new_order = 0
 
         def _safe_int(value: object) -> Optional[int]:
             if value is None:
@@ -1353,6 +1366,18 @@ class KanjiVocabSyncManager:
                 return int(value)  # type: ignore[arg-type]
             except Exception:
                 return None
+
+        all_rows: List[
+            Tuple[
+                int,
+                str,
+                Set[str],
+                bool,
+                Optional[int],
+                Optional[int],
+                Tuple[int, ...],
+            ]
+        ] = []
 
         for model, field_indexes, multiplier in vocab_models:
             if not field_indexes:
@@ -1380,7 +1405,9 @@ class KanjiVocabSyncManager:
             )
             auto_suspend_tag = cfg.auto_suspend_tag.strip()
             auto_suspend_tag_lower = auto_suspend_tag.lower()
-            prepared_rows: List[Tuple[int, str, Set[str], bool, Optional[int], Optional[int]]] = []
+            prepared_rows: List[
+                Tuple[int, str, Set[str], bool, Optional[int], Optional[int]]
+            ] = []
             for (
                 note_id,
                 flds,
@@ -1414,72 +1441,94 @@ class KanjiVocabSyncManager:
                     (note_id, flds, note_tags_lower, bool(has_reviewed), new_due_value, review_due_value)
                 )
 
-            prepared_rows.sort(
-                key=lambda row: (
-                    0 if row[4] is not None else 1,
-                    row[4] if row[4] is not None else 0,
-                    row[0],
-                )
-            )
-
             active_map: Dict[int, bool] = {}
             if cfg.ignore_suspended_vocab and prepared_rows:
                 note_ids = [row[0] for row in prepared_rows]
                 active_map = self._load_note_active_status(collection, note_ids)
 
+            field_indexes_tuple = tuple(field_indexes)
             for note_id, flds, note_tags_lower, reviewed_flag, new_due_value, review_due_value in prepared_rows:
                 if cfg.ignore_suspended_vocab:
                     has_active = active_map.get(note_id, False)
                     if not has_active:
                         if not auto_suspend_tag_lower or auto_suspend_tag_lower not in note_tags_lower:
                             continue
-                review_rank = None
-                if reviewed_flag:
-                    review_rank = review_order
-                    review_order += 1
+                all_rows.append(
+                    (
+                        note_id,
+                        flds,
+                        note_tags_lower,
+                        reviewed_flag,
+                        new_due_value,
+                        review_due_value,
+                        field_indexes_tuple,
+                    )
+                )
 
-                new_rank = None
-                if new_due_value is not None:
-                    new_rank = new_order
-                    new_order += 1
+        if not all_rows:
+            return usage
 
-                fields = flds.split("\x1f")
-                seen_in_note: Set[str] = set()
-                for field_index in field_indexes:
-                    if field_index >= len(fields):
-                        continue
-                    value = fields[field_index]
-                    chars = KANJI_PATTERN.findall(value)
-                    if not chars:
-                        continue
-                    for char in chars:
-                        info = usage.get(char)
-                        if info is None:
-                            info = KanjiUsageInfo()
-                            usage[char] = info
-                        if char not in seen_in_note:
-                            info.vocab_occurrences += 1
-                            seen_in_note.add(char)
-                        if reviewed_flag:
-                            info.reviewed = True
-                            if review_rank is not None and (
-                                info.first_review_order is None
-                                or review_rank < info.first_review_order
-                            ):
-                                info.first_review_order = review_rank
-                            if review_due_value is not None and (
-                                info.first_review_due is None
-                                or review_due_value < info.first_review_due
-                            ):
-                                info.first_review_due = review_due_value
-                        if new_due_value is not None and (
-                            info.first_new_due is None or new_due_value < info.first_new_due
+        big = 10**9
+        new_rows = [row for row in all_rows if row[4] is not None]
+        new_rank_map: Dict[int, int] = {}
+        if new_rows:
+            new_rows.sort(key=lambda row: (row[4], row[0]))  # type: ignore[arg-type]
+            for idx, row in enumerate(new_rows):
+                new_rank_map[row[0]] = idx
+
+        review_rows = [row for row in all_rows if row[3]]
+        review_rank_map: Dict[int, int] = {}
+        if review_rows:
+            review_rows.sort(key=lambda row: ((row[5] if row[5] is not None else big), row[0]))
+            for idx, row in enumerate(review_rows):
+                review_rank_map[row[0]] = idx
+
+        all_rows.sort(
+            key=lambda row: (
+                0 if row[4] is not None else 1,
+                row[4] if row[4] is not None else big,
+                row[0],
+            )
+        )
+
+        for note_id, flds, _note_tags_lower, reviewed_flag, new_due_value, review_due_value, field_indexes_tuple in all_rows:
+            review_rank = review_rank_map.get(note_id)
+            new_rank = new_rank_map.get(note_id)
+            fields = flds.split("\x1f")
+            seen_in_note: Set[str] = set()
+            for field_index in field_indexes_tuple:
+                if field_index >= len(fields):
+                    continue
+                value = fields[field_index]
+                chars = KANJI_PATTERN.findall(value)
+                if not chars:
+                    continue
+                for char in chars:
+                    info = usage.get(char)
+                    if info is None:
+                        info = KanjiUsageInfo()
+                        usage[char] = info
+                    if char not in seen_in_note:
+                        info.vocab_occurrences += 1
+                        seen_in_note.add(char)
+                    if reviewed_flag:
+                        info.reviewed = True
+                        if review_rank is not None and (
+                            info.first_review_order is None or review_rank < info.first_review_order
                         ):
-                            info.first_new_due = new_due_value
-                        if new_rank is not None and (
-                            info.first_new_order is None or new_rank < info.first_new_order
+                            info.first_review_order = review_rank
+                        if review_due_value is not None and (
+                            info.first_review_due is None or review_due_value < info.first_review_due
                         ):
-                            info.first_new_order = new_rank
+                            info.first_review_due = review_due_value
+                    if new_due_value is not None and (
+                        info.first_new_due is None or new_due_value < info.first_new_due
+                    ):
+                        info.first_new_due = new_due_value
+                    if new_rank is not None and (
+                        info.first_new_order is None or new_rank < info.first_new_order
+                    ):
+                        info.first_new_order = new_rank
         return usage
 
     def _notify_summary(self, stats: Dict[str, object]) -> None:
@@ -1687,6 +1736,7 @@ class KanjiVocabSyncManager:
         cfg: AddonConfig,
         frequency_field_name: Optional[str] = None,
         dictionary: Optional[Dict[str, Dict[str, object]]] = None,
+        scheduling_field_name: Optional[str] = None,
     ) -> Tuple[int, int]:
         removed = 0
         resuspended_total = 0
@@ -1699,11 +1749,23 @@ class KanjiVocabSyncManager:
                 continue
             note = _get_note(collection, note_id)
             changed = False
-            if frequency_field_name and dictionary:
-                entry = dictionary.get(kanji_char)
-                if isinstance(entry, dict):
-                    if self._update_frequency_field(note, frequency_field_name, entry.get("frequency")):
-                        changed = True
+            entry_obj: Optional[Dict[str, object]] = None
+            if dictionary:
+                candidate = dictionary.get(kanji_char)
+                if isinstance(candidate, dict):
+                    entry_obj = candidate
+                    if frequency_field_name:
+                        if self._update_frequency_field(note, frequency_field_name, candidate.get("frequency")):
+                            changed = True
+            if self._update_scheduling_info_field(
+                note,
+                scheduling_field_name,
+                kanji_char,
+                cfg,
+                entry_obj,
+                None,
+            ):
+                changed = True
             tag_lookup = {existing.lower(): existing for existing in note.tags if isinstance(existing, str)}
             if tag in note.tags:
                 _remove_tag(note, tag)
@@ -1860,76 +1922,66 @@ class KanjiVocabSyncManager:
         has_vocab: bool,
     ) -> Tuple[Tuple, int]:
         big = 10**9
-        review_order = info.first_review_order if info.first_review_order is not None else big
         review_due = info.first_review_due if info.first_review_due is not None else big
-        new_order = info.first_new_order if info.first_new_order is not None else big
         new_due_raw = info.first_new_due
         vocab_due = new_due_raw if new_due_raw is not None else big
-        new_due = new_due_raw if new_due_raw is not None else due_value
-        if new_due is None:
-            new_due = big
         due_sort = due_value if due_value is not None else big
         has_frequency = frequency is not None
         freq_value = frequency if has_frequency else big
         vocab_count = info.vocab_occurrences if has_vocab else 0
+        review_rank = info.first_review_order if info.first_review_order is not None else big
+        new_rank = info.first_new_order if info.first_new_order is not None else big
 
         if has_vocab and info.reviewed:
-            base_tuple: Tuple = (
+            sort_tuple: Tuple = (
                 0,
                 review_due,
+                -vocab_count,
                 freq_value,
-                review_order,
-                new_due,
-                new_order,
+                review_rank,
                 due_sort,
                 card_id,
             )
+            bucket_id = 0
         elif has_vocab:
-            base_tuple = (
+            sort_tuple = (
                 1,
                 vocab_due,
+                -vocab_count,
                 freq_value,
-                new_order,
-                review_order,
+                new_rank,
+                due_sort,
                 card_id,
             )
+            bucket_id = 1
         else:
-            base_tuple = (
+            sort_tuple = (
                 2,
                 0 if has_frequency else 1,
                 freq_value,
                 due_sort,
                 card_id,
             )
-
-        bucket_id = int(base_tuple[0])
-
-        if mode == "vocab":
-            if bucket_id == 1:
-                vocab_sort_tuple: Tuple = (
-                    bucket_id,
-                    vocab_due,
-                    -vocab_count,
-                    freq_value,
-                    card_id,
-                )
-                return vocab_sort_tuple, bucket_id
-            return base_tuple, bucket_id
+            bucket_id = 2
 
         if mode == "vocab_frequency":
-            appearance_tuple = (-vocab_count, *base_tuple)
-            return appearance_tuple, bucket_id
+            return (-vocab_count, *sort_tuple), bucket_id
 
-        # mode == "frequency"
-        if has_frequency:
+        if mode == "frequency":
+            if has_frequency:
+                return (
+                    0,
+                    freq_value,
+                    card_id,
+                ), bucket_id
             return (
-                0,
-                freq_value,
+                1,
+                due_sort,
                 card_id,
             ), bucket_id
 
-        bucket, *rest = base_tuple
-        return (1 + bucket, *rest), bucket_id
+        # mode == "vocab"
+        return sort_tuple, bucket_id
 
     def _apply_kanji_updates(
         self,
@@ -1965,6 +2017,7 @@ class KanjiVocabSyncManager:
 
         unsuspend_tag = cfg.unsuspended_tag
         frequency_field_name: Optional[str] = None
+        scheduling_field_name: Optional[str] = None
         fields_meta = kanji_model.get("flds") if isinstance(kanji_model, dict) else None
         freq_index = kanji_field_indexes.get("frequency")
         if isinstance(freq_index, int) and isinstance(fields_meta, list) and 0 <= freq_index < len(fields_meta):
@@ -1973,6 +2026,13 @@ class KanjiVocabSyncManager:
                 freq_name = field_meta.get("name")
                 if isinstance(freq_name, str):
                     frequency_field_name = freq_name
+        scheduling_index = kanji_field_indexes.get("scheduling_info")
+        if isinstance(scheduling_index, int) and isinstance(fields_meta, list) and 0 <= scheduling_index < len(fields_meta):
+            scheduling_meta = fields_meta[scheduling_index]
+            if isinstance(scheduling_meta, dict):
+                scheduling_name = scheduling_meta.get("name")
+                if isinstance(scheduling_name, str):
+                    scheduling_field_name = scheduling_name
 
         for kanji_char in unique_chars:
             dictionary_entry = dictionary.get(kanji_char)
@@ -1985,9 +2045,19 @@ class KanjiVocabSyncManager:
                 unsuspended = self._unsuspend_note_cards_if_needed(collection, note, unsuspend_tag)
                 if unsuspended:
                     stats["unsuspended"] += unsuspended
+                note_changed = False
                 if frequency_field_name and isinstance(dictionary_entry, dict):
                     if self._update_frequency_field(note, frequency_field_name, dictionary_entry.get("frequency")):
-                        note.flush()
+                        note_changed = True
+                if self._update_scheduling_info_field(
+                    note,
+                    scheduling_field_name,
+                    kanji_char,
+                    cfg,
+                    dictionary_entry if isinstance(dictionary_entry, dict) else None,
+                    info,
+                ):
+                    note_changed = True
                 if info is not None:
                     self._update_kanji_status_tags(
                         note,
@@ -1995,6 +2065,8 @@ class KanjiVocabSyncManager:
                         has_vocab=True,
                         has_reviewed_vocab=info.reviewed,
                     )
+                if note_changed:
+                    note.flush()
                 continue
 
             if dictionary_entry is None:
@@ -2010,6 +2082,7 @@ class KanjiVocabSyncManager:
                 cfg.existing_tag,
                 cfg.created_tag,
                 cfg,
+                info,
             )
             if created_note_id:
                 stats["created"] += 1
@@ -2033,6 +2106,7 @@ class KanjiVocabSyncManager:
                 cfg,
                 frequency_field_name=frequency_field_name,
                 dictionary=dictionary,
+                scheduling_field_name=scheduling_field_name,
             )
             stats["tag_removed"] = removed
             stats["resuspended"] = resuspended
@@ -2411,6 +2485,7 @@ class KanjiVocabSyncManager:
         existing_tag: str,
         created_tag: str,
         cfg: AddonConfig,
+        usage: Optional[KanjiUsageInfo],
     ) -> Optional[int]:
         note = _new_note(collection, kanji_model)
         field_names = {logical: kanji_model["flds"][idx]["name"] for logical, idx in field_indexes.items()}
@@ -2429,6 +2504,14 @@ class KanjiVocabSyncManager:
         self._assign_field(note, field_names.get("onyomi"), onyomi_value)
         frequency_value = self._format_frequency_value(entry.get("frequency"))
         self._assign_field(note, field_names.get("frequency"), frequency_value)
+        self._update_scheduling_info_field(
+            note,
+            field_names.get("scheduling_info"),
+            kanji_char,
+            cfg,
+            entry,
+            usage,
+        )
 
         tags: List[str] = []
         if existing_tag:
@@ -2468,6 +2551,76 @@ class KanjiVocabSyncManager:
         if not field_name:
             return False
         new_value = self._format_frequency_value(value)
+        try:
+            current = note[field_name]
+        except KeyError:
+            current = ""
+        if current == new_value:
+            return False
+        note[field_name] = new_value
+        return True
+
+    def _build_scheduling_info_payload(
+        self,
+        *,
+        kanji_char: str,
+        cfg: AddonConfig,
+        dictionary_entry: Optional[Dict[str, object]],
+        usage: Optional[KanjiUsageInfo],
+    ) -> str:
+        def _render_optional(value: Optional[int]) -> str:
+            if value is None:
+                return "-"
+            return str(value)
+
+        def _render_bool(value: bool) -> str:
+            return "yes" if value else "no"
+
+        freq_value: Optional[object] = None
+        if isinstance(dictionary_entry, dict):
+            freq_value = dictionary_entry.get("frequency")
+        frequency_text = self._format_frequency_value(freq_value)
+        frequency_display = frequency_text if frequency_text else "-"
+
+        mode = cfg.reorder_mode or "vocab"
+        has_usage = usage is not None
+        reviewed = bool(getattr(usage, "reviewed", False)) if usage else False
+        vocab_occurrences: Optional[int] = getattr(usage, "vocab_occurrences", None) if usage else None
+
+        lines = [
+            f"kanji: {kanji_char or '-'}",
+            f"reorder_mode: {mode}",
+            f"has_vocab_usage: {_render_bool(has_usage)}",
+            f"reviewed_vocab: {_render_bool(reviewed)}",
+            f"first_review_order: {_render_optional(getattr(usage, 'first_review_order', None) if usage else None)}",
+            f"first_review_due: {_render_optional(getattr(usage, 'first_review_due', None) if usage else None)}",
+            f"first_new_due: {_render_optional(getattr(usage, 'first_new_due', None) if usage else None)}",
+            f"first_new_order: {_render_optional(getattr(usage, 'first_new_order', None) if usage else None)}",
+            f"vocab_occurrences: {_render_optional(vocab_occurrences)}",
+            f"dictionary_entry: {_render_bool(isinstance(dictionary_entry, dict))}",
+            f"dictionary_frequency: {frequency_display}",
+        ]
+        return "\n".join(lines)
+
+    def _update_scheduling_info_field(
+        self,
+        note: Note,
+        field_name: Optional[str],
+        kanji_char: str,
+        cfg: AddonConfig,
+        dictionary_entry: Optional[Dict[str, object]],
+        usage: Optional[KanjiUsageInfo],
+    ) -> bool:
+        if not cfg.store_scheduling_info:
+            return False
+        if not field_name:
+            return False
+        new_value = self._build_scheduling_info_payload(
+            kanji_char=kanji_char,
+            cfg=cfg,
+            dictionary_entry=dictionary_entry,
+            usage=usage,
+        )
         try:
             current = note[field_name]
         except KeyError:
@@ -2739,10 +2892,16 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
             ("kunyomi", "Kunyomi field"),
             ("onyomi", "Onyomi field"),
             ("frequency", "Frequency field"),
+            ("scheduling_info", "Scheduling info field"),
         ]:
             combo = QComboBox()
             self.kanji_field_combos[logical_field] = combo
             layout.addRow(label, combo)
+
+        self.scheduling_info_check = QCheckBox("Store scheduling info on kanji notes")
+        self.scheduling_info_check.setChecked(bool(self.config.store_scheduling_info))
+        self.scheduling_info_check.toggled.connect(lambda _checked: self._refresh_kanji_field_combos())
+        layout.addRow(self.scheduling_info_check)
 
         self.kanji_model_combo.currentIndexChanged.connect(self._refresh_kanji_field_combos)
         self._refresh_kanji_field_combos()
@@ -2799,24 +2958,110 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
 
     def _refresh_kanji_field_combos(self) -> None:  # pragma: no cover
         model = self._current_kanji_model()
+        scheduling_enabled = bool(getattr(self, "scheduling_info_check", None) and self.scheduling_info_check.isChecked())
         for logical, combo in self.kanji_field_combos.items():
             combo.clear()
             combo.addItem("<Not set>")
             if not model:
+                combo.setEnabled(logical != "scheduling_info")
                 continue
-            field_names = [fld["name"] for fld in model["flds"]]
+            raw_fields = model.get("flds", [])
+            field_names = [
+                fld.get("name")
+                for fld in raw_fields
+                if isinstance(fld, dict) and isinstance(fld.get("name"), str)
+            ]
             combo.addItems(field_names)
             current_name = self.config.kanji_note_type.fields.get(logical, "")
+            if logical == "scheduling_info" and scheduling_enabled and not current_name:
+                if SCHEDULING_FIELD_DEFAULT_NAME in field_names:
+                    current_name = SCHEDULING_FIELD_DEFAULT_NAME
+                    self.config.kanji_note_type.fields[logical] = current_name
             try:
-                combo.setCurrentIndex(field_names.index(current_name) + 1)
+                if current_name and current_name in field_names:
+                    combo.setCurrentIndex(field_names.index(current_name) + 1)
+                else:
+                    combo.setCurrentIndex(0)
             except ValueError:
                 combo.setCurrentIndex(0)
+            combo.setEnabled(logical != "scheduling_info" or scheduling_enabled)
 
     def _current_kanji_model(self) -> Optional[NotetypeDict]:  # pragma: no cover
         index = self.kanji_model_combo.currentIndex()
         if index < 0 or index >= len(self.models_by_index):
             return None
         return self.models_by_index[index]
+
+    def _suggest_scheduling_field_name(self, model: NotetypeDict) -> str:  # pragma: no cover
+        existing = {
+            fld.get("name")
+            for fld in model.get("flds", [])
+            if isinstance(fld, dict) and isinstance(fld.get("name"), str)
+        }
+        base = SCHEDULING_FIELD_DEFAULT_NAME
+        if base not in existing:
+            return base
+        suffix = 2
+        while True:
+            candidate = f"{base} {suffix}"
+            if candidate not in existing:
+                return candidate
+            suffix += 1
+
+    def _confirm_scheduling_field_full_sync(self) -> bool:  # pragma: no cover
+        message = (
+            "Adding the scheduling info field will force a full sync.\n"
+            "Make sure all of your other devices are synced before continuing."
+        )
+        if QMessageBox is not None:
+            try:
+                ok_button = QMessageBox.StandardButton.Ok
+                cancel_button = QMessageBox.StandardButton.Cancel
+            except AttributeError:
+                ok_button = QMessageBox.Ok
+                cancel_button = QMessageBox.Cancel
+            result = QMessageBox.question(
+                self,
+                "Full Sync Required",
+                message,
+                ok_button | cancel_button,
+                cancel_button,
+            )
+            return result == ok_button
+        if askUser is not None:
+            try:
+                return bool(askUser(message, defaultno=True))
+            except TypeError:
+                return bool(askUser(message))
+        show_warning("Cannot confirm scheduling field addition without user input; cancelling.")
+        return False
+
+    def _create_scheduling_field(self, model: NotetypeDict, field_name: str) -> bool:  # pragma: no cover
+        mw_obj = getattr(self.manager, "mw", None)
+        col = getattr(mw_obj, "col", None) if mw_obj else None
+        if not col:
+            show_warning("Collection is not available; cannot create the scheduling info field.")
+            return False
+        models = getattr(col, "models", None)
+        if not models:
+            show_warning("Note type manager unavailable; cannot create the scheduling info field.")
+            return False
+        try:
+            new_field = models.newField(field_name)
+            models.addField(model, new_field)
+            models.save(model)
+        except Exception as err:  # noqa: BLE001
+            show_warning(f"Unable to create the scheduling info field:\n{err}")
+            return False
+        self.manager._kanji_model_cache = None
+        self.manager._existing_notes_cache = None
+        reset = getattr(mw_obj, "reset", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:
+                pass
+        return True
 
     def _reload_vocab_entries(self) -> None:  # pragma: no cover
         self.vocab_list.clear()
@@ -2956,6 +3201,36 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
                 self.config.kanji_note_type.fields[logical] = ""
                 continue
             self.config.kanji_note_type.fields[logical] = combo.currentText()
+        field_names = {
+            fld.get("name")
+            for fld in model.get("flds", [])
+            if isinstance(fld, dict) and isinstance(fld.get("name"), str)
+        }
+        self.config.store_scheduling_info = bool(self.scheduling_info_check.isChecked())
+        if not self.config.store_scheduling_info:
+            self.config.kanji_note_type.fields["scheduling_info"] = ""
+        else:
+            scheduling_field = self.config.kanji_note_type.fields.get("scheduling_info", "").strip()
+            if not scheduling_field:
+                if SCHEDULING_FIELD_DEFAULT_NAME in field_names:
+                    scheduling_field = SCHEDULING_FIELD_DEFAULT_NAME
+                else:
+                    scheduling_field = self._suggest_scheduling_field_name(model)
+                self.config.kanji_note_type.fields["scheduling_info"] = scheduling_field
+            if scheduling_field not in field_names:
+                if not self._confirm_scheduling_field_full_sync():
+                    return False
+                if not self._create_scheduling_field(model, scheduling_field):
+                    return False
+                field_names = {
+                    fld.get("name")
+                    for fld in model.get("flds", [])
+                    if isinstance(fld, dict) and isinstance(fld.get("name"), str)
+                }
+                if scheduling_field not in field_names:
+                    show_warning("Failed to add the scheduling info field to the kanji note type.")
+                    return False
+                self._refresh_kanji_field_combos()
         required_field = self.config.kanji_note_type.fields.get("kanji", "").strip()
         if not required_field:
             show_warning("Please assign a field that stores the kanji character.")

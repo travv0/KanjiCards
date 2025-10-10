@@ -8,7 +8,8 @@
       "stroke_count": "",
       "kunyomi": "",
       "onyomi": "",
-      "frequency": ""
+      "frequency": "",
+      "scheduling_info": ""
     }
   },
   "existing_tag": "has_vocab_kanji",
@@ -31,5 +32,6 @@
   "auto_suspend_vocab": false,
   "auto_suspend_tag": "kanjicards_new",
   "resuspend_reviewed_low_interval": false,
-  "low_interval_vocab_tag": ""
+  "low_interval_vocab_tag": "",
+  "store_scheduling_info": false
 }

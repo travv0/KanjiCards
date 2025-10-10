@@ -166,6 +166,7 @@ def make_config(kanjicards_module, **overrides):
                 "kunyomi": "Kunyomi",
                 "onyomi": "Onyomi",
                 "frequency": "Frequency",
+                "scheduling_info": "",
             },
         ),
         "existing_tag": "existing",
@@ -187,6 +188,7 @@ def make_config(kanjicards_module, **overrides):
         "auto_suspend_tag": "",
         "resuspend_reviewed_low_interval": False,
         "low_interval_vocab_tag": "",
+        "store_scheduling_info": False,
     }
     base.update(overrides)
     return kanjicards_module.AddonConfig(**base)
@@ -203,6 +205,7 @@ def make_model():
             {"name": "Kunyomi"},
             {"name": "Onyomi"},
             {"name": "Frequency"},
+            {"name": "Scheduling"},
         ],
     }
 
@@ -249,6 +252,62 @@ def test_apply_updates_existing_note_unsuspends_and_tags(manager, kanjicards_mod
     assert "unsuspend" in existing_note.tags
     assert collection.cards[11]["queue"] == collection.cards[11]["type"]
     assert existing_note["Frequency"] == "10"
+
+
+def test_apply_updates_updates_scheduling_field(manager, kanjicards_module, monkeypatch):
+    model = make_model()
+    scheduling_field = "Scheduling"
+    existing_note = FakeNote(
+        1,
+        model,
+        initial={"Character": "火", scheduling_field: ""},
+        tags=[],
+    )
+    collection = FakeCollection(model, notes=[existing_note])
+    cfg = make_config(kanjicards_module)
+    cfg.store_scheduling_info = True
+    cfg.kanji_note_type.fields["scheduling_info"] = scheduling_field
+    field_indexes = {
+        "kanji": 0,
+        "definition": 1,
+        "stroke_count": 2,
+        "kunyomi": 3,
+        "onyomi": 4,
+        "frequency": 5,
+        "scheduling_info": 6,
+    }
+    usage = {
+        "火": kanjicards_module.KanjiUsageInfo(
+            reviewed=True,
+            first_review_due=321,
+            first_review_order=11,
+            first_new_due=654,
+            first_new_order=7,
+            vocab_occurrences=4,
+        )
+    }
+    dictionary = {"火": {"frequency": 10}}
+    monkeypatch.setattr(manager, "_resolve_deck_id", lambda *_: 1)
+
+    stats = manager._apply_kanji_updates(
+        collection,
+        ["火"],
+        dictionary,
+        model,
+        field_indexes,
+        0,
+        cfg,
+        usage,
+        existing_notes={"火": 1},
+        prune_existing=False,
+    )
+
+    assert stats["existing_tagged"] == 1
+    scheduling_value = existing_note[scheduling_field]
+    assert "kanji: 火" in scheduling_value
+    assert "dictionary_frequency: 10" in scheduling_value
+    assert "has_vocab_usage: yes" in scheduling_value
+    assert "reviewed_vocab: yes" in scheduling_value
 
 
 def test_apply_updates_creates_new_notes_and_prunes_old(manager, kanjicards_module, monkeypatch):
@@ -896,6 +955,7 @@ def test_create_kanji_note_populates_fields(manager, kanjicards_module, monkeypa
         "existing",
         "created",
         cfg,
+        None,
     )
     assert note_id is not None
     note = collection.get_note(note_id)
@@ -905,6 +965,50 @@ def test_create_kanji_note_populates_fields(manager, kanjicards_module, monkeypa
     assert note["Kunyomi"] == "ひ"
     assert note["Onyomi"] == "カ"
     assert note["Frequency"] == "12"
+
+
+def test_create_kanji_note_populates_scheduling_info_when_enabled(manager, kanjicards_module, monkeypatch):
+    model = make_model()
+    collection = FakeCollection(model)
+    cfg = make_config(kanjicards_module)
+    cfg.store_scheduling_info = True
+    cfg.kanji_note_type.fields["scheduling_info"] = "Scheduling"
+    field_indexes = {
+        "kanji": 0,
+        "definition": 1,
+        "stroke_count": 2,
+        "kunyomi": 3,
+        "onyomi": 4,
+        "frequency": 5,
+        "scheduling_info": 6,
+    }
+    entry = {
+        "definition": "fire",
+        "stroke_count": 4,
+        "kunyomi": ["ひ"],
+        "onyomi": ["カ"],
+        "frequency": 12,
+    }
+    usage = kanjicards_module.KanjiUsageInfo(reviewed=True, vocab_occurrences=2, first_new_due=777)
+    monkeypatch.setattr(manager, "_resolve_deck_id", lambda *args: 1)
+    monkeypatch.setattr(kanjicards_module, "_add_note", lambda col, note, deck_id: col.add_note(note, deck_id))
+
+    note_id = manager._create_kanji_note(
+        collection,
+        model,
+        field_indexes,
+        entry,
+        "火",
+        "existing",
+        "created",
+        cfg,
+        usage,
+    )
+
+    assert note_id is not None
+    scheduling_text = collection.get_note(note_id)["Scheduling"]
+    assert "dictionary_frequency: 12" in scheduling_text
+    assert "has_vocab_usage: yes" in scheduling_text
 
 
 def test_create_kanji_note_returns_none_when_add_fails(manager, kanjicards_module, monkeypatch):
@@ -928,6 +1032,7 @@ def test_create_kanji_note_returns_none_when_add_fails(manager, kanjicards_modul
         "",
         "",
         cfg,
+        None,
     )
     assert result is None
 

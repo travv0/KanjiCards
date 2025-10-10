@@ -209,6 +209,7 @@ def build_environment(kanjicards_module, reorder_mode):
                 "stroke_count": "",
                 "kunyomi": "",
                 "onyomi": "",
+                "scheduling_info": "",
             },
         ),
         existing_tag="existing",
@@ -232,6 +233,7 @@ def build_environment(kanjicards_module, reorder_mode):
         auto_suspend_tag="",
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
+        store_scheduling_info=False,
     )
 
     initial_tags = {note.id: set(note.tags) for note in notes}
@@ -242,8 +244,8 @@ def build_environment(kanjicards_module, reorder_mode):
 @pytest.mark.parametrize(
     ("mode", "expected_order"),
     [
-        ("vocab", [2, 1, 3, 4, 5, 6]),
-        ("vocab_frequency", [2, 1, 3, 4, 5, 6]),
+        ("vocab", [2, 1, 4, 3, 5, 6]),
+        ("vocab_frequency", [2, 1, 4, 3, 5, 6]),
         ("frequency", [5, 1, 2, 3, 4, 6]),
     ],
 )

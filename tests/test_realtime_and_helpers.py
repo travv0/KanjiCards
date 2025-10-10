@@ -80,6 +80,7 @@ def make_config(kanjicards_module, **overrides):
                 "kunyomi": "",
                 "onyomi": "",
                 "frequency": "",
+                "scheduling_info": "",
             },
         ),
         "existing_tag": "existing",
@@ -99,6 +100,7 @@ def make_config(kanjicards_module, **overrides):
         "auto_suspend_tag": "",
         "resuspend_reviewed_low_interval": False,
         "low_interval_vocab_tag": "",
+        "store_scheduling_info": False,
     }
     base.update(overrides)
     return kanjicards_module.AddonConfig(**base)
