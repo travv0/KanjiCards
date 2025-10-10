@@ -24,7 +24,7 @@ Open **Tools → KanjiCards Settings**.
 Save to persist both the global config and your per-profile overrides.
 
 ## Running a Recalc
-- Use **Tools → Recalc Kanji Cards with Vocab** to run the process on demand.
+- Use **Tools → Recalculate Kanji Cards from Vocab** to run the process on demand.
 - The add-on reports how many kanji it scanned, how many notes were created or tagged, how many cards were suspended/unsuspended, and any characters missing from the dictionary.
 - Newly created kanji notes go to the deck you selected (or the note type’s default deck if left blank).
 - With **Update during reviews** enabled, KanjiCards updates kanji tags and vocab suspension right after you study a new kanji card, so freshly reviewed characters take effect without a manual recalc.

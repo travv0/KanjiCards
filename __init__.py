@@ -516,7 +516,7 @@ class KanjiVocabRecalcManager:
     # ------------------------------------------------------------------
     def _ensure_menu_actions(self) -> None:
         menu = self.mw.form.menuTools
-        recalc_action = menu.addAction("Recalc Kanji Cards with Vocab")
+        recalc_action = menu.addAction("Recalculate Kanji Cards from Vocab")
         recalc_action.triggered.connect(self.run_recalc)
         self._recalc_action = recalc_action
 

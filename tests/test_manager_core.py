@@ -133,7 +133,7 @@ def manager_with_mw(kanjicards_module, tmp_path, monkeypatch):
 def test_manager_init_wires_menu_and_hooks(manager_with_mw, kanjicards_module):
     manager, mw, hooks = manager_with_mw
     labels = [action.label for action in mw.form.menuTools.actions]
-    assert "Recalc Kanji Cards with Vocab" in labels
+    assert "Recalculate Kanji Cards from Vocab" in labels
     assert "KanjiCards Settings" in labels
     assert manager._on_reviewer_did_show_question in hooks.reviewer_did_show_question.callbacks
     assert manager._on_reviewer_did_answer_card in hooks.reviewer_did_answer_card.callbacks
