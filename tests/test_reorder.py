@@ -245,7 +245,7 @@ def build_environment(kanjicards_module, reorder_mode):
 @pytest.mark.parametrize(
     ("mode", "expected_order"),
     [
-        ("vocab", [2, 1, 3, 4, 5, 6]),
+        ("vocab", [2, 1, 4, 3, 5, 6]),
         ("vocab_frequency", [2, 1, 3, 4, 5, 6]),
         ("frequency", [5, 1, 2, 3, 4, 6]),
     ],

@@ -2619,8 +2619,40 @@ class KanjiVocabSyncManager:
         has_new_presence = info.first_new_due is not None or info.has_new_card
 
         if has_vocab and info.reviewed:
+            bucket_id = 0
+        elif has_vocab and has_new_presence:
+            bucket_id = 1
+        elif has_vocab:
+            bucket_id = 2
+        else:
+            bucket_id = 2
+
+        best_due = big
+        if bucket_id == 0:
+            if info.first_review_due is not None:
+                best_due = info.first_review_due
+            elif info.first_new_due is not None:
+                best_due = info.first_new_due
+        elif bucket_id == 1:
+            if info.first_new_due is not None:
+                best_due = info.first_new_due
+            elif info.first_review_due is not None:
+                best_due = info.first_review_due
+
+        collection_frequency = info.vocab_occurrences if has_vocab else 0
+
+        vocab_key = (
+            bucket_id,
+            best_due,
+            -collection_frequency,
+            freq_value,
+            due_sort,
+            card_id,
+        )
+
+        if has_vocab and info.reviewed:
             vocab_tuple: Tuple = (
-                0,
+                bucket_id,
                 review_due,
                 freq_value,
                 review_order,
@@ -2629,40 +2661,28 @@ class KanjiVocabSyncManager:
                 due_sort,
                 card_id,
             )
-            bucket_id = 0
         elif has_vocab and has_new_presence:
             vocab_tuple = (
-                1,
+                bucket_id,
                 new_due,
                 freq_value,
                 new_order,
                 review_order,
                 card_id,
             )
-            bucket_id = 1
-        elif has_vocab:
-            vocab_tuple = (
-                2,
-                0 if has_frequency else 1,
-                freq_value,
-                due_sort,
-                card_id,
-            )
-            bucket_id = 2
         else:
             vocab_tuple = (
-                2,
+                bucket_id,
                 0 if has_frequency else 1,
                 freq_value,
                 due_sort,
                 card_id,
             )
-            bucket_id = 2
-
-        vocab_count = info.vocab_occurrences if has_vocab else 0
 
         if mode == "vocab":
-            return vocab_tuple, bucket_id
+            return vocab_key, bucket_id
+
+        vocab_count = info.vocab_occurrences if has_vocab else 0
 
         if mode == "vocab_frequency":
             appearance_tuple = (-vocab_count, *vocab_tuple)
