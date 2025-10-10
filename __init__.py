@@ -2282,23 +2282,23 @@ class KanjiVocabSyncManager:
                         chars="".join(sorted(chars)),
                     )
                     unsuspended_cards = [card_id for card_id, queue, _ in cards if queue != -1]
+                    newly_suspended = 0
                     if unsuspended_cards:
                         note_obj_local = ensure_note()
-                        suspended_count = _resuspend_note_cards(collection, note_obj_local)
-                        if suspended_count > 0:
-                            stats["vocab_suspended"] += suspended_count
-                        existing_lower = {value.lower() for value in note_obj_local.tags}
-                        if tag_lower not in existing_lower:
-                            _add_tag(note_obj_local, tag)
-                            changed = True
-                            note_has_tag = True
-                    elif not note_has_tag:
-                        note_obj_local = ensure_note()
-                        existing_lower = {value.lower() for value in note_obj_local.tags}
-                        if tag_lower not in existing_lower:
-                            _add_tag(note_obj_local, tag)
-                            changed = True
-                            note_has_tag = True
+                        newly_suspended = _resuspend_note_cards(collection, note_obj_local)
+                        if newly_suspended > 0:
+                            stats["vocab_suspended"] += newly_suspended
+                            existing_lower = {value.lower() for value in note_obj_local.tags}
+                            if tag_lower not in existing_lower:
+                                _add_tag(note_obj_local, tag)
+                                changed = True
+                                note_has_tag = True
+                    else:
+                        self._debug(
+                            "realtime/already_suspended",
+                            note_id=note_id,
+                            chars="".join(sorted(chars)),
+                        )
                 else:
                     if note_has_tag:
                         note_obj_local = ensure_note()

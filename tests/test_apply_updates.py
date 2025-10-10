@@ -385,6 +385,73 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
     assert note.flush_count == 1
 
 
+def test_update_vocab_suspension_skips_tag_when_already_suspended(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+    )
+    note = SimpleNote(303)
+    collection = types.SimpleNamespace()
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {303: ({"火"}, set())},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(
+                has_review_card=False,
+                current_interval=0,
+                historical_interval=0,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {303: [(701, -1, 0)]},
+    )
+
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+
+    called_resuspend = []
+
+    def fail_resuspend(*args, **kwargs):
+        called_resuspend.append(True)
+        raise AssertionError("should not resuspend already suspended note")
+
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        fail_resuspend,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda *args, **kwargs: None,
+    )
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0}
+    assert not called_resuspend
+    assert note.tags == []
+    assert note.flush_count == 0
+
+
 def test_update_vocab_suspension_unsuspends_and_clears_tag(manager, kanjicards_module, monkeypatch):
     cfg = make_config(
         kanjicards_module,
