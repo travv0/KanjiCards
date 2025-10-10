@@ -18,12 +18,17 @@ from collections import defaultdict
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
+from types import ModuleType
 
 from anki.collection import Collection
 from anki.models import NotetypeDict
 from anki.notes import Note
 from anki.utils import intTime
 from aqt import gui_hooks, mw
+try:
+    from aqt.toolbar import Toolbar
+except Exception:  # pragma: no cover - toolbar not available in some test environments
+    Toolbar = Any  # type: ignore[assignment]
 from aqt.qt import (
     QAbstractItemView,
     QCheckBox,
@@ -109,6 +114,9 @@ BUCKET_TAG_KEYS: Tuple[str, str, str] = (
 )
 
 SCHEDULING_FIELD_DEFAULT_NAME = "KanjiCards Scheduling Info"
+
+KANJICARDS_TOOLBAR_CMD = "kanjicards_recalc"
+KANJICARDS_TOOLBAR_ID = "kanjicards_recalc_toolbar"
 
 
 def _safe_print(*args: object, **kwargs: Any) -> None:
@@ -227,6 +235,7 @@ class KanjiVocabRecalcManager:
         self._last_synced_config_hash: Optional[str] = None
         self._pending_config_hash: Optional[str] = None
         self._recalc_action = None
+        self._prioritysieve_toolbar_handler: Optional[Callable[[], None]] = None
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -535,6 +544,20 @@ class KanjiVocabRecalcManager:
             pass
         gui_hooks.reviewer_did_show_question.append(self._on_reviewer_did_show_question)
         gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
+        toolbar_links_hook = getattr(gui_hooks, "top_toolbar_did_init_links", None)
+        if toolbar_links_hook is not None:
+            try:
+                toolbar_links_hook.remove(self._on_top_toolbar_init_links)
+            except (ValueError, AttributeError):
+                pass
+            toolbar_links_hook.append(self._on_top_toolbar_init_links)
+        toolbar_redraw_hook = getattr(gui_hooks, "toolbar_did_redraw", None)
+        if toolbar_redraw_hook is not None:
+            try:
+                toolbar_redraw_hook.remove(self._on_toolbar_did_redraw)
+            except (ValueError, AttributeError):
+                pass
+            toolbar_redraw_hook.append(self._on_toolbar_did_redraw)
         self._install_sync_hook()
 
     def _install_sync_hook(self) -> None:
@@ -556,6 +579,99 @@ class KanjiVocabRecalcManager:
     def show_settings(self) -> None:
         dialog = KanjiVocabRecalcSettingsDialog(self, self.load_config())
         dialog.exec()
+
+    def _prioritysieve_recalc_main(self) -> Optional[ModuleType]:
+        module = sys.modules.get("prioritysieve.recalc.recalc_main")
+        if module is None:
+            try:
+                module = __import__(
+                    "prioritysieve.recalc.recalc_main",
+                    fromlist=["recalc", "set_followup_sync_callback"],
+                )
+            except Exception:
+                return None
+        if not hasattr(module, "recalc") or not hasattr(module, "set_followup_sync_callback"):
+            return None
+        return module  # type: ignore[return-value]
+
+    def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
+        if self._prioritysieve_recalc_main():
+            for index in range(len(links) - 1, -1, -1):
+                if f'id="{KANJICARDS_TOOLBAR_ID}"' in links[index]:
+                    links.pop(index)
+            return
+        for link in links:
+            if f'id="{KANJICARDS_TOOLBAR_ID}"' in link:
+                return
+        link = toolbar.create_link(
+            cmd=KANJICARDS_TOOLBAR_CMD,
+            label="Recalc",
+            func=self._run_toolbar_recalc_only,
+            tip="Recalculate Kanji cards",
+            id=KANJICARDS_TOOLBAR_ID,
+        )
+        links.append(link)
+
+    def _on_toolbar_did_redraw(self, toolbar: Toolbar) -> None:
+        link_handlers = getattr(toolbar, "link_handlers", None)
+        if not isinstance(link_handlers, dict):
+            return
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main and "recalc_toolbar" in link_handlers:
+            if self._prioritysieve_toolbar_handler is None:
+                def handler() -> None:
+                    self._run_prioritysieve_toolbar_sequence()
+
+                self._prioritysieve_toolbar_handler = handler
+            link_handlers["recalc_toolbar"] = self._prioritysieve_toolbar_handler
+        else:
+            self._prioritysieve_toolbar_handler = None
+            if KANJICARDS_TOOLBAR_CMD in link_handlers:
+                link_handlers[KANJICARDS_TOOLBAR_CMD] = self._run_toolbar_recalc_only
+
+    def _run_toolbar_recalc_only(self) -> None:
+        self.run_recalc()
+
+    def _run_prioritysieve_toolbar_sequence(self) -> None:
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main is None:
+            self.run_recalc()
+            return
+        previous_callback = getattr(ps_main, "_followup_sync_callback", None)
+
+        def _after_prioritysieve_recalc() -> None:
+            def _finish() -> None:
+                try:
+                    if callable(previous_callback):
+                        previous_callback()
+                except Exception:
+                    pass
+                finally:
+                    self.run_recalc()
+
+            taskman = getattr(self.mw, "taskman", None)
+            if taskman and hasattr(taskman, "run_on_main"):
+                try:
+                    taskman.run_on_main(_finish)
+                    return
+                except Exception:
+                    pass
+            _finish()
+
+        try:
+            ps_main.set_followup_sync_callback(_after_prioritysieve_recalc)
+        except Exception:
+            self.run_recalc()
+            return
+
+        try:
+            ps_main.recalc()
+        except Exception:
+            try:
+                ps_main.set_followup_sync_callback(previous_callback)
+            except Exception:
+                pass
+            self.run_recalc()
 
     # ------------------------------------------------------------------
     # Recalc routine

@@ -1,3 +1,4 @@
+import sys
 import types
 from pathlib import Path
 
@@ -39,6 +40,16 @@ class FakeMenu:
         action = FakeAction(label)
         self.actions.append(action)
         return action
+
+
+class FakeToolbar:
+    def __init__(self) -> None:
+        self.link_handlers = {}
+
+    def create_link(self, cmd: str, label: str, func, tip: str | None = None, id: str | None = None) -> str:
+        self.link_handlers[cmd] = func
+        id_attr = f'id="{id}"' if id else ""
+        return f'<a {id_attr} data-cmd="{cmd}">{label}</a>'
 
 
 class FakeAddonManager:
@@ -162,6 +173,75 @@ def test_manager_init_without_registered_addon(monkeypatch, kanjicards_module, t
     monkeypatch.setattr(kanjicards_module, "mw", mw)
     manager = kanjicards_module.KanjiVocabRecalcManager()
     assert Path(manager.addon_dir) == Path(kanjicards_module.__file__).parent
+
+
+def test_toolbar_link_added_without_prioritysieve(manager_with_profile, monkeypatch):
+    for key in list(sys.modules):
+        if key.startswith("prioritysieve"):
+            monkeypatch.delitem(sys.modules, key, raising=False)
+
+    toolbar = FakeToolbar()
+    links: list[str] = []
+
+    manager_with_profile._on_top_toolbar_init_links(links, toolbar)
+
+    assert any('id="kanjicards_recalc_toolbar"' in link for link in links)
+
+    calls: list[str] = []
+    manager_with_profile.run_recalc = lambda: calls.append("kanjicards")  # type: ignore[assignment]
+
+    manager_with_profile._on_toolbar_did_redraw(toolbar)
+    handler = toolbar.link_handlers.get("kanjicards_recalc")
+    assert callable(handler)
+    handler()
+
+    assert calls == ["kanjicards"]
+
+
+def test_toolbar_combines_with_prioritysieve(manager_with_profile, monkeypatch):
+    events: list[str] = []
+
+    class FakeRecalcMainModule(types.ModuleType):
+        def __init__(self) -> None:
+            super().__init__("prioritysieve.recalc.recalc_main")
+            self._followup_sync_callback = None
+
+        def set_followup_sync_callback(self, callback):
+            self._followup_sync_callback = callback
+
+        def recalc(self):
+            if self._followup_sync_callback is not None:
+                callback = self._followup_sync_callback
+                self._followup_sync_callback = None
+                callback()
+
+    fake_module = FakeRecalcMainModule()
+
+    monkeypatch.setitem(sys.modules, "prioritysieve", types.ModuleType("prioritysieve"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc", types.ModuleType("prioritysieve.recalc"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
+
+    toolbar = FakeToolbar()
+    toolbar.link_handlers["recalc_toolbar"] = lambda: events.append("original")
+
+    manager_with_profile.mw.taskman = FakeTaskman()
+
+    def ps_followup():
+        events.append("priority_followup")
+
+    fake_module._followup_sync_callback = ps_followup
+
+    manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
+    manager_with_profile._prioritysieve_toolbar_handler = None
+
+    manager_with_profile._on_top_toolbar_init_links([], toolbar)
+    manager_with_profile._on_toolbar_did_redraw(toolbar)
+
+    handler = toolbar.link_handlers.get("recalc_toolbar")
+    assert callable(handler)
+    handler()
+
+    assert events == ["priority_followup", "kanjicards"]
 
 
 def test_show_settings_uses_dialog(manager_with_profile, kanjicards_module, monkeypatch):
