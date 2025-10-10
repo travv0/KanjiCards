@@ -198,7 +198,7 @@ def test_toolbar_link_added_without_prioritysieve(manager_with_profile, monkeypa
     assert calls == ["kanjicards"]
 
 
-def test_toolbar_combines_with_prioritysieve(manager_with_profile, monkeypatch):
+def test_prioritysieve_recalc_runs_kanjicards_afterwards(manager_with_profile, monkeypatch):
     events: list[str] = []
 
     class FakeRecalcMainModule(types.ModuleType):
@@ -210,6 +210,7 @@ def test_toolbar_combines_with_prioritysieve(manager_with_profile, monkeypatch):
             self._followup_sync_callback = callback
 
         def recalc(self):
+            events.append("priority_recalc")
             if self._followup_sync_callback is not None:
                 callback = self._followup_sync_callback
                 self._followup_sync_callback = None
@@ -221,27 +222,23 @@ def test_toolbar_combines_with_prioritysieve(manager_with_profile, monkeypatch):
     monkeypatch.setitem(sys.modules, "prioritysieve.recalc", types.ModuleType("prioritysieve.recalc"))
     monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
 
-    toolbar = FakeToolbar()
-    toolbar.link_handlers["recalc_toolbar"] = lambda: events.append("original")
+    def previous_callback():
+        events.append("priority_followup")
+
+    fake_module._followup_sync_callback = previous_callback
 
     manager_with_profile.mw.taskman = FakeTaskman()
 
-    def ps_followup():
-        events.append("priority_followup")
-
-    fake_module._followup_sync_callback = ps_followup
-
     manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
-    manager_with_profile._prioritysieve_toolbar_handler = None
 
-    manager_with_profile._on_top_toolbar_init_links([], toolbar)
-    manager_with_profile._on_toolbar_did_redraw(toolbar)
+    manager_with_profile._maybe_wrap_prioritysieve_recalc(fake_module)
 
-    handler = toolbar.link_handlers.get("recalc_toolbar")
-    assert callable(handler)
-    handler()
+    assert getattr(fake_module, "_kanjicards_recalc_wrapper_installed", False) is True
+    assert manager_with_profile._prioritysieve_recalc_wrapped is True
 
-    assert events == ["priority_followup", "kanjicards"]
+    fake_module.recalc()
+
+    assert events == ["priority_recalc", "priority_followup", "kanjicards"]
 
 
 def test_show_settings_uses_dialog(manager_with_profile, kanjicards_module, monkeypatch):

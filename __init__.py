@@ -16,6 +16,7 @@ import sys
 import time
 from collections import defaultdict
 import xml.etree.ElementTree as ET
+from functools import wraps
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 from types import ModuleType
@@ -235,7 +236,7 @@ class KanjiVocabRecalcManager:
         self._last_synced_config_hash: Optional[str] = None
         self._pending_config_hash: Optional[str] = None
         self._recalc_action = None
-        self._prioritysieve_toolbar_handler: Optional[Callable[[], None]] = None
+        self._prioritysieve_recalc_wrapped = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -559,6 +560,7 @@ class KanjiVocabRecalcManager:
                 pass
             toolbar_redraw_hook.append(self._on_toolbar_did_redraw)
         self._install_sync_hook()
+        self._maybe_wrap_prioritysieve_recalc()
 
     def _install_sync_hook(self) -> None:
         if self._sync_hook_installed:
@@ -594,8 +596,70 @@ class KanjiVocabRecalcManager:
             return None
         return module  # type: ignore[return-value]
 
+    def _maybe_wrap_prioritysieve_recalc(self, ps_main: Optional[ModuleType] = None) -> None:
+        if not hasattr(self, "_prioritysieve_recalc_wrapped"):
+            setattr(self, "_prioritysieve_recalc_wrapped", False)
+        if self._prioritysieve_recalc_wrapped:
+            return
+        if ps_main is None:
+            ps_main = self._prioritysieve_recalc_main()
+        if ps_main is None:
+            return
+        if getattr(ps_main, "_kanjicards_recalc_wrapper_installed", False):
+            self._prioritysieve_recalc_wrapped = True
+            return
+        original_recalc = getattr(ps_main, "recalc", None)
+        if not callable(original_recalc):
+            return
+
+        manager = self
+
+        @wraps(original_recalc)
+        def wrapped_recalc(*args: object, **kwargs: object) -> object:
+            previous_callback = getattr(ps_main, "_followup_sync_callback", None)
+
+            def _after_prioritysieve_recalc() -> None:
+                def _finish() -> None:
+                    try:
+                        if callable(previous_callback):
+                            previous_callback()
+                    except Exception:
+                        pass
+                    finally:
+                        manager.run_recalc()
+
+                taskman = getattr(manager.mw, "taskman", None)
+                if taskman and hasattr(taskman, "run_on_main"):
+                    try:
+                        taskman.run_on_main(_finish)
+                        return
+                    except Exception:
+                        pass
+                _finish()
+
+            try:
+                ps_main.set_followup_sync_callback(_after_prioritysieve_recalc)
+            except Exception:
+                manager.run_recalc()
+                return original_recalc(*args, **kwargs)
+            try:
+                return original_recalc(*args, **kwargs)
+            except Exception:
+                try:
+                    ps_main.set_followup_sync_callback(previous_callback)
+                except Exception:
+                    pass
+                manager.run_recalc()
+                raise
+
+        setattr(ps_main, "recalc", wrapped_recalc)
+        setattr(ps_main, "_kanjicards_recalc_wrapper_installed", True)
+        self._prioritysieve_recalc_wrapped = True
+
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
-        if self._prioritysieve_recalc_main():
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main:
+            self._maybe_wrap_prioritysieve_recalc(ps_main)
             for index in range(len(links) - 1, -1, -1):
                 if f'id="{KANJICARDS_TOOLBAR_ID}"' in links[index]:
                     links.pop(index)
@@ -606,7 +670,7 @@ class KanjiVocabRecalcManager:
         link = toolbar.create_link(
             cmd=KANJICARDS_TOOLBAR_CMD,
             label="Recalc",
-            func=self._run_toolbar_recalc_only,
+            func=self.run_recalc,
             tip="Recalculate Kanji cards",
             id=KANJICARDS_TOOLBAR_ID,
         )
@@ -616,62 +680,9 @@ class KanjiVocabRecalcManager:
         link_handlers = getattr(toolbar, "link_handlers", None)
         if not isinstance(link_handlers, dict):
             return
-        ps_main = self._prioritysieve_recalc_main()
-        if ps_main and "recalc_toolbar" in link_handlers:
-            if self._prioritysieve_toolbar_handler is None:
-                def handler() -> None:
-                    self._run_prioritysieve_toolbar_sequence()
-
-                self._prioritysieve_toolbar_handler = handler
-            link_handlers["recalc_toolbar"] = self._prioritysieve_toolbar_handler
-        else:
-            self._prioritysieve_toolbar_handler = None
-            if KANJICARDS_TOOLBAR_CMD in link_handlers:
-                link_handlers[KANJICARDS_TOOLBAR_CMD] = self._run_toolbar_recalc_only
-
-    def _run_toolbar_recalc_only(self) -> None:
-        self.run_recalc()
-
-    def _run_prioritysieve_toolbar_sequence(self) -> None:
-        ps_main = self._prioritysieve_recalc_main()
-        if ps_main is None:
-            self.run_recalc()
-            return
-        previous_callback = getattr(ps_main, "_followup_sync_callback", None)
-
-        def _after_prioritysieve_recalc() -> None:
-            def _finish() -> None:
-                try:
-                    if callable(previous_callback):
-                        previous_callback()
-                except Exception:
-                    pass
-                finally:
-                    self.run_recalc()
-
-            taskman = getattr(self.mw, "taskman", None)
-            if taskman and hasattr(taskman, "run_on_main"):
-                try:
-                    taskman.run_on_main(_finish)
-                    return
-                except Exception:
-                    pass
-            _finish()
-
-        try:
-            ps_main.set_followup_sync_callback(_after_prioritysieve_recalc)
-        except Exception:
-            self.run_recalc()
-            return
-
-        try:
-            ps_main.recalc()
-        except Exception:
-            try:
-                ps_main.set_followup_sync_callback(previous_callback)
-            except Exception:
-                pass
-            self.run_recalc()
+        self._maybe_wrap_prioritysieve_recalc()
+        if KANJICARDS_TOOLBAR_CMD in link_handlers:
+            link_handlers[KANJICARDS_TOOLBAR_CMD] = self.run_recalc
 
     # ------------------------------------------------------------------
     # Recalc routine
