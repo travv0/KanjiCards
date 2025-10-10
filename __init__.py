@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import hashlib
 import os
 import re
 import sys
@@ -210,6 +211,8 @@ class KanjiVocabSyncManager:
         self._last_vocab_sync_mod: Optional[int] = None
         self._last_vocab_sync_count: Optional[int] = None
         self._pending_vocab_sync_marker: Optional[Tuple[int, int]] = None
+        self._last_synced_config_hash: Optional[str] = None
+        self._pending_config_hash: Optional[str] = None
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -284,9 +287,15 @@ class KanjiVocabSyncManager:
                 self._last_vocab_sync_count = int(marker_count)
             except Exception:
                 self._last_vocab_sync_count = None
+            config_hash = data.get("last_config_hash")
+            if isinstance(config_hash, str) and config_hash:
+                self._last_synced_config_hash = config_hash
+            else:
+                self._last_synced_config_hash = None
             return data
         self._last_vocab_sync_mod = None
         self._last_vocab_sync_count = None
+        self._last_synced_config_hash = None
         return {}
 
     def _load_profile_config_or_seed(self, global_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -314,6 +323,10 @@ class KanjiVocabSyncManager:
                 payload["last_vocab_sync_count"] = int(self._last_vocab_sync_count)
             else:
                 payload.pop("last_vocab_sync_count", None)
+            if self._last_synced_config_hash:
+                payload["last_config_hash"] = self._last_synced_config_hash
+            else:
+                payload.pop("last_config_hash", None)
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=False)
         except Exception as err:  # noqa: BLE001
@@ -456,6 +469,11 @@ class KanjiVocabSyncManager:
             "low_interval_vocab_tag": cfg.low_interval_vocab_tag,
         }
 
+    def _hash_config(self, cfg: AddonConfig) -> str:
+        serialized = self._serialize_config(cfg)
+        payload = json.dumps(serialized, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     def load_config(self) -> AddonConfig:
         global_raw_obj = self.mw.addonManager.getConfig(__name__)
         global_raw = global_raw_obj if isinstance(global_raw_obj, dict) else {}
@@ -545,6 +563,7 @@ class KanjiVocabSyncManager:
             stats = self._sync_internal(progress_tracker=progress_tracker, cfg=cfg)
         except Exception as err:  # noqa: BLE001
             self._pending_vocab_sync_marker = None
+            self._pending_config_hash = None
             self.mw.progress.finish()
             show_critical(f"KanjiCards sync failed:\n{err}")
             return None
@@ -604,6 +623,9 @@ class KanjiVocabSyncManager:
         collection = self.mw.col
         if collection is None:
             raise RuntimeError("Collection not available")
+
+        cfg_hash = self._hash_config(cfg)
+        self._pending_config_hash = cfg_hash
 
         if not cfg.kanji_note_type.name:
             raise RuntimeError("Kanji note type is not configured yet")
@@ -719,11 +741,13 @@ class KanjiVocabSyncManager:
         return False
 
     def _commit_vocab_sync_marker(self, cfg: AddonConfig) -> None:
-        if self._pending_vocab_sync_marker is None:
-            return
-        count, max_mod = self._pending_vocab_sync_marker
-        self._last_vocab_sync_count = int(count)
-        self._last_vocab_sync_mod = int(max_mod)
+        if self._pending_vocab_sync_marker is not None:
+            count, max_mod = self._pending_vocab_sync_marker
+            self._last_vocab_sync_count = int(count)
+            self._last_vocab_sync_mod = int(max_mod)
+        if self._pending_config_hash is not None:
+            self._last_synced_config_hash = self._pending_config_hash
+        self._pending_config_hash = None
         raw = self._serialize_config(cfg)
         self._write_profile_config(raw)
         self._pending_vocab_sync_marker = None
@@ -1011,7 +1035,12 @@ class KanjiVocabSyncManager:
         if not self.mw or not self.mw.col:
             return
         collection = self.mw.col
-        if not self._have_vocab_notes_changed(collection, cfg):
+        config_hash = self._hash_config(cfg)
+        config_changed = self._last_synced_config_hash != config_hash
+        vocab_changed = False
+        if not config_changed:
+            vocab_changed = self._have_vocab_notes_changed(collection, cfg)
+        if not config_changed and not vocab_changed:
             return
 
         def trigger() -> None:

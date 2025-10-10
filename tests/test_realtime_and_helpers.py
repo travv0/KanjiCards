@@ -61,6 +61,8 @@ def manager(kanjicards_module):
     manager._last_vocab_sync_count = None
     manager._pending_vocab_sync_marker = None
     manager._suppress_next_auto_sync = False
+    manager._last_synced_config_hash = None
+    manager._pending_config_hash = None
     return manager
 
 

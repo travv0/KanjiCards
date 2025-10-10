@@ -238,7 +238,51 @@ def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicard
     manager_with_profile._on_sync_event()
 
     assert delays.count(200) >= 2
-    assert manager_with_profile._suppress_next_auto_sync is True
+
+
+def test_on_sync_event_runs_when_config_changed(manager_with_profile, kanjicards_module, tmp_path):
+    mw = FakeMainWindow(tmp_path)
+    manager_with_profile.mw = mw
+    manager_with_profile._suppress_next_auto_sync = False
+    raw_cfg = {
+        "kanji_note_type": {
+            "name": "Kanji",
+            "fields": {
+                "kanji": "Character",
+                "definition": "Meaning",
+                "stroke_count": "Strokes",
+                "kunyomi": "Kun",
+                "onyomi": "On",
+                "frequency": "Freq",
+            },
+        },
+        "vocab_note_types": [],
+        "auto_run_on_sync": True,
+    }
+    cfg = manager_with_profile._config_from_raw(raw_cfg)
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
+    manager_with_profile._stats_warrant_sync = lambda stats: False  # type: ignore[assignment]
+    manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    run_calls = []
+
+    def fake_sync_internal(**kwargs):
+        manager_with_profile._pending_vocab_sync_marker = (0, 0)
+        current_cfg = kwargs.get("cfg", cfg)
+        manager_with_profile._pending_config_hash = manager_with_profile._hash_config(current_cfg)
+        run_calls.append(True)
+        return {"created": 0}
+
+    manager_with_profile._sync_internal = fake_sync_internal  # type: ignore[assignment]
+    manager_with_profile._trigger_followup_sync = lambda: False  # type: ignore[assignment]
+    mw.col = object()
+    manager_with_profile._last_synced_config_hash = "previous"
+    expected_hash = manager_with_profile._hash_config(cfg)
+
+    manager_with_profile._on_sync_event()
+
+    assert run_calls
+    assert manager_with_profile._last_synced_config_hash == expected_hash
+    assert manager_with_profile._suppress_next_auto_sync is False
 
 
 def test_on_sync_event_respects_suppression(manager_with_profile):
@@ -266,5 +310,7 @@ def test_on_sync_event_skips_when_no_vocab_changes(manager_with_profile, tmp_pat
         return {}
 
     manager_with_profile.run_sync = fail_run_sync  # type: ignore[assignment]
+    manager_with_profile._last_synced_config_hash = manager_with_profile._hash_config(cfg)
+    mw.col = types.SimpleNamespace()
     manager_with_profile._on_sync_event()
     assert "run" not in called
