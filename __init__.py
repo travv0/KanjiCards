@@ -134,6 +134,7 @@ def _safe_print(*args: object, **kwargs: Any) -> None:
 class VocabNoteTypeConfig:
     name: str
     fields: List[str] = field(default_factory=list)
+    due_multiplier: float = 1.0
 
 
 @dataclass
@@ -367,10 +368,18 @@ class KanjiVocabSyncManager:
                     continue
                 fields_raw = item.get("fields", []) or []
                 fields = [field for field in fields_raw if isinstance(field, str)]
+                multiplier_raw = item.get("due_multiplier", 1.0)
+                try:
+                    multiplier_val = float(multiplier_raw)
+                except Exception:
+                    multiplier_val = 1.0
+                if multiplier_val <= 0:
+                    multiplier_val = 1.0
                 vocab_cfg.append(
                     VocabNoteTypeConfig(
                         name=item.get("note_type", ""),
                         fields=fields,
+                        due_multiplier=multiplier_val,
                     )
                 )
 
@@ -417,7 +426,11 @@ class KanjiVocabSyncManager:
     def _serialize_config(self, cfg: AddonConfig) -> Dict[str, Any]:
         return {
             "vocab_note_types": [
-                {"note_type": item.name, "fields": list(item.fields)}
+                {
+                    "note_type": item.name,
+                    "fields": list(item.fields),
+                    "due_multiplier": float(item.due_multiplier),
+                }
                 for item in cfg.vocab_note_types
             ],
             "kanji_note_type": {
@@ -640,7 +653,7 @@ class KanjiVocabSyncManager:
                 except Exception:
                     continue
 
-        vocab_field_map = {model["id"]: field_indexes for model, field_indexes in vocab_models}
+        vocab_field_map = {model["id"]: field_indexes for model, field_indexes, _ in vocab_models}
         self._progress_step(progress_tracker, "Updating vocabulary suspension…")
         suspension_stats = self._update_vocab_suspension(
             collection,
@@ -659,11 +672,11 @@ class KanjiVocabSyncManager:
     def _compute_vocab_sync_marker(
         self,
         collection: Collection,
-        vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
+        vocab_models: Sequence[Tuple[NotetypeDict, List[int], float]],
     ) -> Tuple[int, int]:
         model_ids = [
             model["id"]
-            for model, _ in vocab_models
+            for model, _, _ in vocab_models
             if isinstance(model, dict) and isinstance(model.get("id"), int)
         ]
         if not model_ids:
@@ -961,7 +974,7 @@ class KanjiVocabSyncManager:
             self._debug("realtime/skip", reason="vocab_map_empty")
             return
 
-        vocab_field_map = {model["id"]: indexes for model, indexes in vocab_map.values()}
+        vocab_field_map = {model["id"]: indexes for model, indexes, _ in vocab_map.values()}
         note_id_value = getattr(note, "id", note_id_hint)
         self._debug(
             "realtime/process",
@@ -1130,8 +1143,8 @@ class KanjiVocabSyncManager:
         self,
         collection: Collection,
         cfg: AddonConfig,
-    ) -> List[Tuple[NotetypeDict, List[int]]]:
-        vocab_models: List[Tuple[NotetypeDict, List[int]]] = []
+    ) -> List[Tuple[NotetypeDict, List[int], float]]:
+        vocab_models: List[Tuple[NotetypeDict, List[int], float]] = []
         for vocab_cfg in cfg.vocab_note_types:
             if not vocab_cfg.name:
                 continue
@@ -1145,17 +1158,24 @@ class KanjiVocabSyncManager:
                 continue
             for fname in vocab_cfg.fields:
                 field_indexes.append(name_to_index[fname])
-            vocab_models.append((model, field_indexes))
+            multiplier = vocab_cfg.due_multiplier if vocab_cfg.due_multiplier > 0 else 1.0
+            try:
+                multiplier = float(multiplier)
+            except Exception:
+                multiplier = 1.0
+            if multiplier <= 0:
+                multiplier = 1.0
+            vocab_models.append((model, field_indexes, multiplier))
         return vocab_models
 
     def _get_vocab_model_map(
         self,
         collection: Collection,
         cfg: AddonConfig,
-    ) -> Dict[int, Tuple[NotetypeDict, List[int]]]:
+    ) -> Dict[int, Tuple[NotetypeDict, List[int], float]]:
         key = tuple(
             sorted(
-                (entry.name, tuple(entry.fields))
+                (entry.name, tuple(entry.fields), float(entry.due_multiplier))
                 for entry in cfg.vocab_note_types
                 if entry.name
             )
@@ -1165,7 +1185,7 @@ class KanjiVocabSyncManager:
             return cache["mapping"]
 
         vocab_models = self._resolve_vocab_models(collection, cfg)
-        mapping = {model["id"]: (model, field_indexes) for model, field_indexes in vocab_models}
+        mapping = {model["id"]: (model, field_indexes, multiplier) for model, field_indexes, multiplier in vocab_models}
         self._vocab_model_cache = {"key": key, "mapping": mapping}
         return mapping
 
@@ -1290,7 +1310,7 @@ class KanjiVocabSyncManager:
     def _collect_vocab_usage(
         self,
         collection: Collection,
-        vocab_models: Sequence[Tuple[NotetypeDict, List[int]]],
+        vocab_models: Sequence[Tuple[NotetypeDict, List[int], float]],
         cfg: AddonConfig,
     ) -> Dict[str, KanjiUsageInfo]:
         usage: Dict[str, KanjiUsageInfo] = {}
@@ -1305,9 +1325,15 @@ class KanjiVocabSyncManager:
             except Exception:
                 return None
 
-        for model, field_indexes in vocab_models:
+        for model, field_indexes, multiplier in vocab_models:
             if not field_indexes:
                 continue
+            try:
+                multiplier_value = float(multiplier)
+            except Exception:
+                multiplier_value = 1.0
+            if multiplier_value <= 0:
+                multiplier_value = 1.0
             sql = (
                 "SELECT notes.id, notes.flds, notes.tags, "
                 "MAX(CASE WHEN cards.type != 0 THEN 1 ELSE 0 END) AS has_reviewed, "
@@ -1346,6 +1372,14 @@ class KanjiVocabSyncManager:
                     and (new_due_value is None or suspended_due_value < new_due_value)
                 ):
                     new_due_value = suspended_due_value
+                if new_due_value is not None:
+                    try:
+                        scaled_value = int(round(new_due_value * multiplier_value))
+                    except Exception:
+                        scaled_value = new_due_value
+                    if scaled_value < 0:
+                        scaled_value = 0
+                    new_due_value = scaled_value
                 review_due_value = _safe_int(min_review_due)
                 prepared_rows.append(
                     (note_id, flds, note_tags_lower, bool(has_reviewed), new_due_value, review_due_value)
@@ -2759,7 +2793,12 @@ class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
         self.vocab_list.clear()
         for entry in self.config.vocab_note_types:
             fields = ", ".join(entry.fields)
-            item = QListWidgetItem(f"{entry.name} — {fields}")
+            multiplier = float(entry.due_multiplier) if entry.due_multiplier else 1.0
+            if multiplier <= 0:
+                multiplier = 1.0
+            multiplier_text = f"×{multiplier:g}"
+            suffix = f" ({multiplier_text})" if multiplier != 1.0 else ""
+            item = QListWidgetItem(f"{entry.name} — {fields}{suffix}")
             item.setData(USER_ROLE, entry)
             self.vocab_list.addItem(item)
 
@@ -2925,6 +2964,23 @@ class VocabNoteConfigDialog(QDialog):  # pragma: no cover
         self._populate_models(selected_name)
         form.addRow("Note type", self.model_combo)
 
+        self.multiplier_spin = QSpinBox()
+        self.multiplier_spin.setRange(1, 100000)
+        initial_multiplier = getattr(existing, "due_multiplier", 1.0) if existing else 1.0
+        try:
+            initial_multiplier = float(initial_multiplier)
+        except Exception:
+            initial_multiplier = 1.0
+        if initial_multiplier <= 0:
+            initial_multiplier = 1.0
+        initial_int = int(round(initial_multiplier)) if initial_multiplier else 1
+        if initial_int <= 0:
+            initial_int = 1
+        if initial_int > 100000:
+            initial_int = 100000
+        self.multiplier_spin.setValue(initial_int)
+        form.addRow("Due multiplier", self.multiplier_spin)
+
         self.fields_list = QListWidget()
         self.fields_list.setSelectionMode(NO_SELECTION)
         layout.addWidget(QLabel("Fields to scan for kanji"))
@@ -2981,7 +3037,14 @@ class VocabNoteConfigDialog(QDialog):  # pragma: no cover
         if not selected_fields:
             show_warning("Select at least one field to scan for kanji.")
             return
-        self.existing = VocabNoteTypeConfig(name=model["name"], fields=selected_fields)
+        multiplier_value = float(self.multiplier_spin.value())
+        if multiplier_value <= 0:
+            multiplier_value = 1.0
+        self.existing = VocabNoteTypeConfig(
+            name=model["name"],
+            fields=selected_fields,
+            due_multiplier=float(multiplier_value),
+        )
         self.accept()
 
     def get_result(self) -> VocabNoteTypeConfig:  # pragma: no cover

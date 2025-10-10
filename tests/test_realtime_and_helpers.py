@@ -115,7 +115,7 @@ def test_process_reviewed_card_triggers_vocab_update(manager, kanjicards_module,
     monkeypatch.setattr(
         manager,
         "_get_vocab_model_map",
-        lambda *args, **kwargs: {1: ({"id": 1}, [0])},
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
     )
     monkeypatch.setattr(
         manager,
@@ -154,7 +154,7 @@ def test_process_reviewed_card_triggers_for_review_queue(manager, kanjicards_mod
     monkeypatch.setattr(
         manager,
         "_get_vocab_model_map",
-        lambda *args, **kwargs: {1: ({"id": 1}, [0])},
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
     )
     monkeypatch.setattr(
         manager,
@@ -192,7 +192,7 @@ def test_process_reviewed_card_fetches_note_on_failure(manager, kanjicards_modul
     monkeypatch.setattr(
         manager,
         "_get_vocab_model_map",
-        lambda *args, **kwargs: {1: ({"id": 1}, [0])},
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
     )
     monkeypatch.setattr(
         manager,
@@ -325,7 +325,7 @@ def test_process_reviewed_card_no_kanji_chars(manager, kanjicards_module, monkey
     monkeypatch.setattr(
         manager,
         "_get_vocab_model_map",
-        lambda *args, **kwargs: {1: ({"id": 1}, [0])},
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
     )
     manager._process_reviewed_card(card)
 
@@ -376,7 +376,7 @@ def test_resolve_vocab_models_filters_missing_fields(manager, kanjicards_module)
     collection = FakeCollection([vocab_model])
     cfg = make_config(kanjicards_module)
     results = manager._resolve_vocab_models(collection, cfg)
-    assert results == [(vocab_model, [0])]
+    assert results == [(vocab_model, [0], 1.0)]
 
 
 def test_resolve_field_indexes_maps_names(manager):

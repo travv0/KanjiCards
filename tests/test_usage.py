@@ -65,7 +65,7 @@ def test_collect_vocab_usage_tracks_firsts(manager, kanjicards_module):
         "name": "Vocab",
         "flds": [{"name": "Expression"}],
     }
-    usage = manager._collect_vocab_usage(collection, [(model, [0])], make_config(kanjicards_module))
+    usage = manager._collect_vocab_usage(collection, [(model, [0], 1.0)], make_config(kanjicards_module))
     fire_info = usage["火"]
     assert fire_info.reviewed is True
     assert fire_info.vocab_occurrences == 2
@@ -96,8 +96,32 @@ def test_collect_vocab_usage_includes_tagged_suspended_due(manager, kanjicards_m
     }
     cfg = make_config(kanjicards_module)
     cfg.auto_suspend_tag = "kanjicards_new"
-    usage = manager._collect_vocab_usage(collection, [(model, [0])], cfg)
+    usage = manager._collect_vocab_usage(collection, [(model, [0], 1.0)], cfg)
     info = usage["未"]
     assert info.first_new_due == 7
     assert info.first_new_order == 0
     assert info.vocab_occurrences == 1
+
+
+def test_collect_vocab_usage_applies_due_multiplier(manager, kanjicards_module):
+    rows = [
+        (1, "火\x1fmeaning", "", 0, 100, None, None),
+    ]
+    collection = FakeCollection(rows)
+    model = {
+        "id": 1,
+        "name": "Vocab",
+        "flds": [{"name": "Expression"}],
+    }
+    cfg = make_config(kanjicards_module)
+    cfg.vocab_note_types = [
+        kanjicards_module.VocabNoteTypeConfig(
+            name="Vocab",
+            fields=["Expression"],
+            due_multiplier=30.0,
+        )
+    ]
+    usage = manager._collect_vocab_usage(collection, [(model, [0], 30.0)], cfg)
+    info = usage["火"]
+    assert info.first_new_due == 3000
+    assert info.first_new_order == 0

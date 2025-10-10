@@ -815,7 +815,7 @@ def test_sync_internal_aggregates_stats(manager, kanjicards_module, monkeypatch)
     monkeypatch.setattr(
         manager,
         "_resolve_vocab_models",
-        lambda *args, **kwargs: [({"id": 20}, [0])],
+        lambda *args, **kwargs: [({"id": 20}, [0], 1.0)],
     )
     dictionary = {"火": {"frequency": 10}}
     monkeypatch.setattr(manager, "_load_dictionary", lambda *args, **kwargs: dictionary)
