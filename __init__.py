@@ -17,7 +17,7 @@ import time
 from collections import defaultdict
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from anki.collection import Collection
 from anki.models import NotetypeDict
@@ -1040,14 +1040,28 @@ class KanjiVocabSyncManager:
         self._realtime_error_logged = False
 
     def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
+        self.run_after_sync()
+
+    def run_after_sync(
+        self,
+        *,
+        allow_followup: bool = True,
+        on_finished: Optional[Callable[[bool], None]] = None,
+    ) -> None:
+        callback = on_finished or (lambda _changed: None)
         if self._suppress_next_auto_sync:
             self._suppress_next_auto_sync = False
+            callback(False)
             return
+
         cfg = self.load_config()
         if not cfg.auto_run_on_sync:
+            callback(False)
             return
         if not self.mw or not self.mw.col:
+            callback(False)
             return
+
         collection = self.mw.col
         config_hash = self._hash_config(cfg)
         config_changed = self._last_synced_config_hash != config_hash
@@ -1055,28 +1069,48 @@ class KanjiVocabSyncManager:
         if not config_changed:
             vocab_changed = self._have_vocab_notes_changed(collection, cfg)
         if not config_changed and not vocab_changed:
+            callback(False)
             return
 
-        def trigger() -> None:
+        def execute() -> None:
             if not self.mw or not self.mw.col:
-                return
-            busy_check = getattr(self.mw.progress, "busy", None)
-            if callable(busy_check) and busy_check():
-                QTimer.singleShot(200, trigger)
+                callback(False)
                 return
             self._realtime_error_logged = False
             stats = self.run_sync()
-            if stats and self._stats_warrant_sync(stats):
+            changed = bool(stats and self._stats_warrant_sync(stats))
+            if changed and allow_followup:
+
                 def followup() -> None:
                     if self._trigger_followup_sync():
                         self._suppress_next_auto_sync = True
 
                 QTimer.singleShot(200, followup)
+            callback(changed)
 
-        try:
-            self.mw.taskman.run_on_main(trigger)
-        except Exception:
-            trigger()
+        busy_check = getattr(self.mw.progress, "busy", None)
+        if callable(busy_check) and busy_check():
+            QTimer.singleShot(
+                200,
+                lambda: self.run_after_sync(
+                    allow_followup=allow_followup,
+                    on_finished=callback,
+                ),
+            )
+            return
+
+        taskman = getattr(self.mw, "taskman", None)
+        run_on_main = getattr(taskman, "run_on_main", None)
+        if callable(run_on_main):
+            try:
+                run_on_main(execute)
+                return
+            except Exception:
+                pass
+        execute()
+
+    def mark_followup_sync_scheduled(self) -> None:
+        self._suppress_next_auto_sync = True
 
     def _stats_warrant_sync(self, stats: Dict[str, object]) -> bool:
         for key in (

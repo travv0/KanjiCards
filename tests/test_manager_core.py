@@ -240,6 +240,40 @@ def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicard
     assert delays.count(200) >= 2
 
 
+def test_run_after_sync_without_followup(manager_with_profile, kanjicards_module, tmp_path):
+    mw = FakeMainWindow(tmp_path)
+    manager_with_profile.mw = mw
+    cfg = manager_with_profile._config_from_raw(
+        {
+            "kanji_note_type": {"name": "Kanji", "fields": {}},
+            "vocab_note_types": [],
+            "auto_run_on_sync": True,
+        }
+    )
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
+    manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: True  # type: ignore[assignment]
+    manager_with_profile._stats_warrant_sync = lambda stats: True  # type: ignore[assignment]
+    manager_with_profile.run_sync = lambda: {"created": 1}  # type: ignore[assignment]
+
+    called = {}
+
+    def fake_trigger() -> bool:
+        called["trigger"] = True
+        return True
+
+    manager_with_profile._trigger_followup_sync = fake_trigger  # type: ignore[assignment]
+
+    results = []
+    manager_with_profile.run_after_sync(
+        allow_followup=False,
+        on_finished=lambda changed: results.append(changed),
+    )
+
+    assert results == [True]
+    assert called == {}
+    assert manager_with_profile._suppress_next_auto_sync is False
+
+
 def test_on_sync_event_runs_when_config_changed(manager_with_profile, kanjicards_module, tmp_path):
     mw = FakeMainWindow(tmp_path)
     manager_with_profile.mw = mw
