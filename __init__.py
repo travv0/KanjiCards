@@ -1305,13 +1305,23 @@ class KanjiVocabSyncManager:
         usage: Dict[str, KanjiUsageInfo] = {}
         review_order = 0
         new_order = 0
+
+        def _safe_int(value: object) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                return int(value)  # type: ignore[arg-type]
+            except Exception:
+                return None
+
         for model, field_indexes in vocab_models:
             if not field_indexes:
                 continue
             sql = (
-                "SELECT notes.id, notes.flds, "
+                "SELECT notes.id, notes.flds, notes.tags, "
                 "MAX(CASE WHEN cards.type != 0 THEN 1 ELSE 0 END) AS has_reviewed, "
                 "MIN(CASE WHEN cards.queue = 0 THEN cards.due END) AS min_new_due, "
+                "MIN(CASE WHEN cards.queue = -1 THEN cards.due END) AS min_suspended_due, "
                 "MIN(CASE WHEN cards.type != 0 THEN cards.due END) AS min_review_due "
                 "FROM notes JOIN cards ON cards.nid = notes.id "
                 "WHERE notes.mid = ? GROUP BY notes.id"
@@ -1322,56 +1332,62 @@ class KanjiVocabSyncManager:
                 model["id"],
                 context=f"collect_vocab_usage:{model.get('name')}",
             )
-            rows.sort(key=lambda row: (
-                0 if row[3] is not None else 1,
-                row[3] if row[3] is not None else 0,
-                row[0],
-            ))
-
-            active_map: Dict[int, bool] = {}
             auto_suspend_tag = cfg.auto_suspend_tag.strip()
             auto_suspend_tag_lower = auto_suspend_tag.lower()
-            if cfg.ignore_suspended_vocab and rows:
-                note_ids = [row[0] for row in rows]
+            prepared_rows: List[Tuple[int, str, Set[str], bool, Optional[int], Optional[int]]] = []
+            for (
+                note_id,
+                flds,
+                tags_text,
+                has_reviewed,
+                min_new_due,
+                min_suspended_due,
+                min_review_due,
+            ) in rows:
+                tags_string = tags_text or ""
+                note_tags_lower = {tag.lower() for tag in tags_string.split() if tag}
+                new_due_value = _safe_int(min_new_due)
+                suspended_due_value = _safe_int(min_suspended_due)
+                if (
+                    auto_suspend_tag_lower
+                    and auto_suspend_tag_lower in note_tags_lower
+                    and suspended_due_value is not None
+                    and (new_due_value is None or suspended_due_value < new_due_value)
+                ):
+                    new_due_value = suspended_due_value
+                review_due_value = _safe_int(min_review_due)
+                prepared_rows.append(
+                    (note_id, flds, note_tags_lower, bool(has_reviewed), new_due_value, review_due_value)
+                )
+
+            prepared_rows.sort(
+                key=lambda row: (
+                    0 if row[4] is not None else 1,
+                    row[4] if row[4] is not None else 0,
+                    row[0],
+                )
+            )
+
+            active_map: Dict[int, bool] = {}
+            if cfg.ignore_suspended_vocab and prepared_rows:
+                note_ids = [row[0] for row in prepared_rows]
                 active_map = self._load_note_active_status(collection, note_ids)
 
-            for note_id, flds, has_reviewed, min_new_due, min_review_due in rows:
+            for note_id, flds, note_tags_lower, reviewed_flag, new_due_value, review_due_value in prepared_rows:
                 if cfg.ignore_suspended_vocab:
                     has_active = active_map.get(note_id, False)
                     if not has_active:
-                        if not auto_suspend_tag_lower:
+                        if not auto_suspend_tag_lower or auto_suspend_tag_lower not in note_tags_lower:
                             continue
-                        try:
-                            note_obj = _get_note(collection, note_id)
-                        except Exception:  # noqa: BLE001
-                            continue
-                        note_tags_lower = {tag.lower() for tag in getattr(note_obj, "tags", [])}
-                        if auto_suspend_tag_lower not in note_tags_lower:
-                            continue
-                reviewed_flag = bool(has_reviewed)
                 review_rank = None
                 if reviewed_flag:
                     review_rank = review_order
                     review_order += 1
 
-                new_due_value: Optional[int] = None
-                if min_new_due is not None:
-                    try:
-                        new_due_value = int(min_new_due)
-                    except Exception:
-                        new_due_value = None
-
                 new_rank = None
                 if new_due_value is not None:
                     new_rank = new_order
                     new_order += 1
-
-                review_due_value: Optional[int] = None
-                if min_review_due is not None:
-                    try:
-                        review_due_value = int(min_review_due)
-                    except Exception:
-                        review_due_value = None
 
                 fields = flds.split("\x1f")
                 seen_in_note: Set[str] = set()
@@ -1793,15 +1809,18 @@ class KanjiVocabSyncManager:
         review_order = info.first_review_order if info.first_review_order is not None else big
         review_due = info.first_review_due if info.first_review_due is not None else big
         new_order = info.first_new_order if info.first_new_order is not None else big
-        new_due = info.first_new_due if info.first_new_due is not None else due_value
+        new_due_raw = info.first_new_due
+        vocab_due = new_due_raw if new_due_raw is not None else big
+        new_due = new_due_raw if new_due_raw is not None else due_value
         if new_due is None:
             new_due = big
         due_sort = due_value if due_value is not None else big
         has_frequency = frequency is not None
         freq_value = frequency if has_frequency else big
+        vocab_count = info.vocab_occurrences if has_vocab else 0
 
         if has_vocab and info.reviewed:
-            vocab_tuple: Tuple = (
+            base_tuple: Tuple = (
                 0,
                 review_due,
                 freq_value,
@@ -1812,16 +1831,16 @@ class KanjiVocabSyncManager:
                 card_id,
             )
         elif has_vocab:
-            vocab_tuple = (
+            base_tuple = (
                 1,
-                new_due,
+                vocab_due,
                 freq_value,
                 new_order,
                 review_order,
                 card_id,
             )
         else:
-            vocab_tuple = (
+            base_tuple = (
                 2,
                 0 if has_frequency else 1,
                 freq_value,
@@ -1829,15 +1848,22 @@ class KanjiVocabSyncManager:
                 card_id,
             )
 
-        bucket_id = int(vocab_tuple[0])
-
-        vocab_count = info.vocab_occurrences if has_vocab else 0
+        bucket_id = int(base_tuple[0])
 
         if mode == "vocab":
-            return vocab_tuple, bucket_id
+            if bucket_id == 1:
+                vocab_sort_tuple: Tuple = (
+                    bucket_id,
+                    vocab_due,
+                    -vocab_count,
+                    freq_value,
+                    card_id,
+                )
+                return vocab_sort_tuple, bucket_id
+            return base_tuple, bucket_id
 
         if mode == "vocab_frequency":
-            appearance_tuple = (-vocab_count, *vocab_tuple)
+            appearance_tuple = (-vocab_count, *base_tuple)
             return appearance_tuple, bucket_id
 
         # mode == "frequency"
@@ -1848,7 +1874,7 @@ class KanjiVocabSyncManager:
                 card_id,
             ), bucket_id
 
-        bucket, *rest = vocab_tuple
+        bucket, *rest = base_tuple
         return (1 + bucket, *rest), bucket_id
 
     def _apply_kanji_updates(

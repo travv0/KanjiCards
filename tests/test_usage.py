@@ -55,9 +55,9 @@ def make_config(kanjicards_module):
 
 def test_collect_vocab_usage_tracks_firsts(manager, kanjicards_module):
     rows = [
-        (1, "火火\x1fmeaning", 1, None, 15),
-        (2, "火曜\x1fmeaning", 0, 10, None),
-        (3, "水\x1fmeaning", 0, 20, None),
+        (1, "火火\x1fmeaning", "", 1, None, None, 15),
+        (2, "火曜\x1fmeaning", "", 0, 10, None, None),
+        (3, "水\x1fmeaning", "", 0, 20, None, None),
     ]
     collection = FakeCollection(rows)
     model = {
@@ -82,3 +82,22 @@ def test_collect_vocab_usage_tracks_firsts(manager, kanjicards_module):
     water_info = usage["水"]
     assert water_info.first_new_due == 20
     assert water_info.first_new_order == 1
+
+
+def test_collect_vocab_usage_includes_tagged_suspended_due(manager, kanjicards_module):
+    rows = [
+        (1, "未\x1fmeaning", "kanjicards_new ", 0, None, 7, None),
+    ]
+    collection = FakeCollection(rows)
+    model = {
+        "id": 1,
+        "name": "Vocab",
+        "flds": [{"name": "Expression"}],
+    }
+    cfg = make_config(kanjicards_module)
+    cfg.auto_suspend_tag = "kanjicards_new"
+    usage = manager._collect_vocab_usage(collection, [(model, [0])], cfg)
+    info = usage["未"]
+    assert info.first_new_due == 7
+    assert info.first_new_order == 0
+    assert info.vocab_occurrences == 1

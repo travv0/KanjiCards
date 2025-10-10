@@ -300,3 +300,75 @@ def test_reorder_new_kanji_cards_full_collection(mode, expected_order, kanjicard
         for tag in buckets.values():
             if note_id not in expected_bucket_members[tag]:
                 assert tag not in note.tags
+
+
+def test_build_reorder_key_vocab_bucket_sorting(kanjicards_module):
+    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    cases = [
+        (
+            101,
+            kanjicards_module.KanjiUsageInfo(
+                reviewed=False,
+                first_new_due=5,
+                first_new_order=0,
+                vocab_occurrences=1,
+            ),
+            300,
+        ),
+        (
+            102,
+            kanjicards_module.KanjiUsageInfo(
+                reviewed=False,
+                first_new_due=10,
+                first_new_order=1,
+                vocab_occurrences=5,
+            ),
+            400,
+        ),
+        (
+            103,
+            kanjicards_module.KanjiUsageInfo(
+                reviewed=False,
+                first_new_due=10,
+                first_new_order=2,
+                vocab_occurrences=2,
+            ),
+            100,
+        ),
+        (
+            104,
+            kanjicards_module.KanjiUsageInfo(
+                reviewed=False,
+                first_new_due=10,
+                first_new_order=3,
+                vocab_occurrences=2,
+            ),
+            150,
+        ),
+        (
+            105,
+            kanjicards_module.KanjiUsageInfo(
+                reviewed=False,
+                first_new_due=10,
+                first_new_order=4,
+                vocab_occurrences=2,
+            ),
+            None,
+        ),
+    ]
+
+    keys = []
+    for card_id, info, frequency in cases:
+        key, bucket_id = manager._build_reorder_key(
+            "vocab",
+            info,
+            frequency,
+            due_value=0,
+            card_id=card_id,
+            has_vocab=True,
+        )
+        assert bucket_id == 1
+        keys.append((key, card_id))
+
+    sorted_ids = [card_id for key, card_id in sorted(keys, key=lambda entry: entry[0])]
+    assert sorted_ids == [101, 102, 103, 104, 105]
