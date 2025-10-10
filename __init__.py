@@ -201,7 +201,7 @@ class KanjiIntervalStatus:
         return self.historical_interval > 0 or self.has_review_card
 
 
-class KanjiVocabSyncManager:
+class KanjiVocabRecalcManager:
     """Core coordinator for the KanjiCards add-on."""
 
     def __init__(self) -> None:
@@ -226,6 +226,7 @@ class KanjiVocabSyncManager:
         self._pending_vocab_sync_marker: Optional[Tuple[int, int]] = None
         self._last_synced_config_hash: Optional[str] = None
         self._pending_config_hash: Optional[str] = None
+        self._recalc_action = None
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -515,9 +516,9 @@ class KanjiVocabSyncManager:
     # ------------------------------------------------------------------
     def _ensure_menu_actions(self) -> None:
         menu = self.mw.form.menuTools
-        sync_action = menu.addAction("Sync Kanji Cards with Vocab")
-        sync_action.triggered.connect(self.run_sync)
-        self._sync_action = sync_action
+        recalc_action = menu.addAction("Recalc Kanji Cards with Vocab")
+        recalc_action.triggered.connect(self.run_recalc)
+        self._recalc_action = recalc_action
 
         settings_action = menu.addAction("KanjiCards Settings")
         settings_action.triggered.connect(self.show_settings)
@@ -553,13 +554,13 @@ class KanjiVocabSyncManager:
             break
 
     def show_settings(self) -> None:
-        dialog = KanjiVocabSyncSettingsDialog(self, self.load_config())
+        dialog = KanjiVocabRecalcSettingsDialog(self, self.load_config())
         dialog.exec()
 
     # ------------------------------------------------------------------
-    # Sync routine
+    # Recalc routine
     # ------------------------------------------------------------------
-    def run_sync(self) -> None:
+    def run_recalc(self) -> None:
         self.mw.checkpoint("KanjiCards")
         progress_obj = getattr(self.mw, "progress", None)
         self.mw.progress.start(label="Preparing KanjiCards…", immediate=True)
@@ -575,12 +576,12 @@ class KanjiVocabSyncManager:
                     pass
         cfg = self.load_config()
         try:
-            stats = self._sync_internal(progress_tracker=progress_tracker, cfg=cfg)
+            stats = self._recalc_internal(progress_tracker=progress_tracker, cfg=cfg)
         except Exception as err:  # noqa: BLE001
             self._pending_vocab_sync_marker = None
             self._pending_config_hash = None
             self.mw.progress.finish()
-            show_critical(f"KanjiCards sync failed:\n{err}")
+            show_critical(f"KanjiCards recalc failed:\n{err}")
             return None
         else:
             self.mw.progress.finish()
@@ -627,7 +628,7 @@ class KanjiVocabSyncManager:
         except Exception:
             pass
 
-    def _sync_internal(
+    def _recalc_internal(
         self,
         *,
         progress_tracker: Optional[Dict[str, object]] = None,
@@ -847,7 +848,7 @@ class KanjiVocabSyncManager:
             self._process_reviewed_card(card)
         except Exception as err:  # noqa: BLE001
             if not self._realtime_error_logged:
-                _safe_print(f"[KanjiCards] realtime sync error: {err}")
+                _safe_print(f"[KanjiCards] realtime recalc error: {err}")
                 self._realtime_error_logged = True
 
     def _process_reviewed_card(self, card: Any) -> None:
@@ -1077,7 +1078,7 @@ class KanjiVocabSyncManager:
                 callback(False)
                 return
             self._realtime_error_logged = False
-            stats = self.run_sync()
+            stats = self.run_recalc()
             changed = bool(stats and self._stats_warrant_sync(stats))
             if changed and allow_followup:
 
@@ -2796,10 +2797,10 @@ class KanjiVocabSyncManager:
         return str(candidate)
 
 
-class KanjiVocabSyncSettingsDialog(QDialog):  # pragma: no cover
+class KanjiVocabRecalcSettingsDialog(QDialog):  # pragma: no cover
     """Settings dialog for configuring the add-on."""
 
-    def __init__(self, manager: KanjiVocabSyncManager, config: AddonConfig) -> None:  # pragma: no cover
+    def __init__(self, manager: KanjiVocabRecalcManager, config: AddonConfig) -> None:  # pragma: no cover
         super().__init__(manager.mw)
         self.setWindowTitle("KanjiCards Settings")
         self.manager = manager
@@ -3267,7 +3268,7 @@ class VocabNoteConfigDialog(QDialog):  # pragma: no cover
 
     def __init__(
         self,
-        manager: KanjiVocabSyncManager,
+        manager: KanjiVocabRecalcManager,
         existing: Optional[VocabNoteTypeConfig] = None,
     ) -> None:  # pragma: no cover
         super().__init__(manager.mw)
@@ -3375,13 +3376,18 @@ class VocabNoteConfigDialog(QDialog):  # pragma: no cover
         return self.existing
 
 
-_manager: Optional[KanjiVocabSyncManager] = None
+# Backwards-compatible aliases for external integrations
+KanjiVocabSyncManager = KanjiVocabRecalcManager
+KanjiVocabSyncSettingsDialog = KanjiVocabRecalcSettingsDialog
+
+
+_manager: Optional[KanjiVocabRecalcManager] = None
 
 
 def _initialize_manager() -> None:
     global _manager
     if _manager is None and mw is not None:
-        _manager = KanjiVocabSyncManager()
+        _manager = KanjiVocabRecalcManager()
 
 
 def on_profile_loaded() -> None:

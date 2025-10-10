@@ -134,7 +134,7 @@ class FakeCollection:
 
 @pytest.fixture
 def manager(kanjicards_module):
-    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     manager.mw = types.SimpleNamespace()
     manager._debug_enabled = False
     manager._debug_path = None
@@ -856,7 +856,7 @@ def test_load_note_active_status(manager, kanjicards_module, monkeypatch):
     assert status == {1: True, 2: False}
 
 
-def test_sync_internal_aggregates_stats(manager, kanjicards_module, monkeypatch):
+def test_recalc_internal_aggregates_stats(manager, kanjicards_module, monkeypatch):
     cfg = make_config(
         kanjicards_module,
         reorder_mode="frequency",
@@ -916,7 +916,7 @@ def test_sync_internal_aggregates_stats(manager, kanjicards_module, monkeypatch)
         lambda *args, **kwargs: (5, 123),
     )
 
-    stats = manager._sync_internal()
+    stats = manager._recalc_internal()
 
     assert stats["kanji_scanned"] == 1
     assert stats["cards_reordered"] == 2
@@ -1037,10 +1037,10 @@ def test_create_kanji_note_returns_none_when_add_fails(manager, kanjicards_modul
     assert result is None
 
 
-def test_sync_internal_requires_configured_kanji(manager, kanjicards_module):
+def test_recalc_internal_requires_configured_kanji(manager, kanjicards_module):
     cfg = make_config(kanjicards_module)
     cfg.kanji_note_type.name = ""
     manager.load_config = lambda: cfg
     manager.mw = types.SimpleNamespace(col=types.SimpleNamespace())
     with pytest.raises(RuntimeError):
-        manager._sync_internal()
+        manager._recalc_internal()

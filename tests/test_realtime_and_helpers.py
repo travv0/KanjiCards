@@ -63,7 +63,7 @@ class FakeCollection:
 
 @pytest.fixture
 def manager(kanjicards_module):
-    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     manager.mw = types.SimpleNamespace()
     manager._debug_enabled = False
     manager._debug_path = None

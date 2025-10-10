@@ -8,7 +8,7 @@ import pytest
 
 @pytest.fixture
 def manager(kanjicards_module, tmp_path):
-    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     manager.mw = types.SimpleNamespace()
     manager.addon_name = "KanjiCards"
     manager.addon_dir = str(tmp_path)

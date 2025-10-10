@@ -4,7 +4,7 @@
   "mod": 0,
   "version": "0.1.0",
   "author": "Codex",
-  "description": "Sync kanji cards with reviewed vocabulary notes",
+  "description": "Recalc kanji cards with reviewed vocabulary notes",
   "config": 1,
   "homepage": "https://example.com/kanji_vocab_sync",
   "supportedVersions": [

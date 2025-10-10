@@ -49,7 +49,7 @@ def real_env(tmp_path_factory):
 
     KC = importlib.import_module("KanjiCards")
 
-    manager = KC.KanjiVocabSyncManager.__new__(KC.KanjiVocabSyncManager)
+    manager = KC.KanjiVocabRecalcManager.__new__(KC.KanjiVocabRecalcManager)
     dummy_addon_dir = tmp_dir / "addon"
     dummy_addon_dir.mkdir()
 

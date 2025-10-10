@@ -123,7 +123,7 @@ class FakeCollection:
 
 
 def build_environment(kanjicards_module, reorder_mode):
-    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     manager.mw = types.SimpleNamespace()
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None
@@ -307,7 +307,7 @@ def test_reorder_new_kanji_cards_full_collection(mode, expected_order, kanjicard
 
 
 def test_build_reorder_key_vocab_bucket_sorting(kanjicards_module):
-    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     manager._last_synced_config_hash = None
     manager._pending_config_hash = None
     cases = [

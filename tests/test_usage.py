@@ -20,7 +20,7 @@ class FakeCollection:
 
 @pytest.fixture
 def manager(kanjicards_module):
-    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     manager.mw = types.SimpleNamespace()
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None

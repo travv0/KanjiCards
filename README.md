@@ -23,12 +23,12 @@ Open **Tools → KanjiCards Settings**.
 - **Vocab notes tab**: add each vocabulary note type you care about and choose the text fields that should be scanned for kanji.
 Save to persist both the global config and your per-profile overrides.
 
-## Running a Sync
-- Use **Tools → Sync Kanji Cards with Vocab** to run the process on demand.
+## Running a Recalc
+- Use **Tools → Recalc Kanji Cards with Vocab** to run the process on demand.
 - The add-on reports how many kanji it scanned, how many notes were created or tagged, how many cards were suspended/unsuspended, and any characters missing from the dictionary.
 - Newly created kanji notes go to the deck you selected (or the note type’s default deck if left blank).
-- With **Update during reviews** enabled, KanjiCards updates kanji tags and vocab suspension right after you study a new kanji card, so freshly reviewed characters take effect without a manual sync.
-- With **Run automatically after sync** enabled, Anki triggers a sync pass once the collection finishes syncing; if changes were made, KanjiCards asks Anki to sync again so the updates propagate.
+- With **Update during reviews** enabled, KanjiCards updates kanji tags and vocab suspension right after you study a new kanji card, so freshly reviewed characters take effect without a manual recalc.
+- With **Run automatically after sync** enabled, KanjiCards runs a recalc as soon as the collection finishes syncing; if changes were made, it asks Anki to sync again so the updates propagate.
 
 ## Dictionary Data and Licensing
 KANJIDIC2 data (including SKIP codes) is released under the Creative Commons Attribution-ShareAlike 4.0 International License (CC BY-SA 4.0). If you redistribute the file with this add-on or a deck, you must provide attribution, link to the license, and share any modifications under the same license.

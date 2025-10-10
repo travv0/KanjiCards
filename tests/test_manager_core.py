@@ -126,14 +126,14 @@ def manager_with_mw(kanjicards_module, tmp_path, monkeypatch):
     monkeypatch.setattr(kanjicards_module, "gui_hooks", hooks)
     mw = FakeMainWindow(tmp_path)
     monkeypatch.setattr(kanjicards_module, "mw", mw)
-    manager = kanjicards_module.KanjiVocabSyncManager()
+    manager = kanjicards_module.KanjiVocabRecalcManager()
     yield manager, mw, hooks
 
 
 def test_manager_init_wires_menu_and_hooks(manager_with_mw, kanjicards_module):
     manager, mw, hooks = manager_with_mw
     labels = [action.label for action in mw.form.menuTools.actions]
-    assert "Sync Kanji Cards with Vocab" in labels
+    assert "Recalc Kanji Cards with Vocab" in labels
     assert "KanjiCards Settings" in labels
     assert manager._on_reviewer_did_show_question in hooks.reviewer_did_show_question.callbacks
     assert manager._on_reviewer_did_answer_card in hooks.reviewer_did_answer_card.callbacks
@@ -160,7 +160,7 @@ def test_manager_init_without_registered_addon(monkeypatch, kanjicards_module, t
         writeConfig=lambda name, data: None,
     )
     monkeypatch.setattr(kanjicards_module, "mw", mw)
-    manager = kanjicards_module.KanjiVocabSyncManager()
+    manager = kanjicards_module.KanjiVocabRecalcManager()
     assert Path(manager.addon_dir) == Path(kanjicards_module.__file__).parent
 
 
@@ -174,19 +174,19 @@ def test_show_settings_uses_dialog(manager_with_profile, kanjicards_module, monk
         def exec(self):
             recorded["exec"] = True
 
-    monkeypatch.setattr(kanjicards_module, "KanjiVocabSyncSettingsDialog", DummyDialog)
+    monkeypatch.setattr(kanjicards_module, "KanjiVocabRecalcSettingsDialog", DummyDialog)
     manager_with_profile.load_config = lambda: {"existing_tag": "x"}  # type: ignore[assignment]
     manager_with_profile.show_settings()
     assert recorded["exec"] is True
 
 
-def test_run_sync_success_and_failure(manager_with_profile, kanjicards_module, monkeypatch, tmp_path):
+def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module, monkeypatch, tmp_path):
     mw = FakeMainWindow(tmp_path)
     manager_with_profile.mw = mw
     manager_with_profile.addon_dir = str(tmp_path)
     stats_called = {}
     monkeypatch.setattr(manager_with_profile, "_notify_summary", lambda stats: stats_called.setdefault("stats", stats))
-    manager_with_profile._sync_internal = lambda **kwargs: {"created": 1}  # type: ignore[assignment]
+    manager_with_profile._recalc_internal = lambda **kwargs: {"created": 1}  # type: ignore[assignment]
     cfg = manager_with_profile._config_from_raw(
         {
             "kanji_note_type": {"name": "Kanji", "fields": {}},
@@ -195,16 +195,16 @@ def test_run_sync_success_and_failure(manager_with_profile, kanjicards_module, m
     )
     manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
 
-    result = manager_with_profile.run_sync()
+    result = manager_with_profile.run_recalc()
     assert result["created"] == 1
     assert stats_called["stats"]["created"] == 1
     assert mw.progress.finished is True
     assert mw._reset_calls == 1
 
-    manager_with_profile._sync_internal = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[assignment]
+    manager_with_profile._recalc_internal = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[assignment]
     called = {}
     monkeypatch.setattr(kanjicards_module, "show_critical", lambda message: called.setdefault("message", message))
-    assert manager_with_profile.run_sync() is None
+    assert manager_with_profile.run_recalc() is None
     assert "boom" in called["message"]
 
 
@@ -221,7 +221,7 @@ def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicard
     )
     manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
     manager_with_profile._stats_warrant_sync = lambda stats: True  # type: ignore[assignment]
-    manager_with_profile.run_sync = lambda: {"created": 1}  # type: ignore[assignment]
+    manager_with_profile.run_recalc = lambda: {"created": 1}  # type: ignore[assignment]
     manager_with_profile._trigger_followup_sync = lambda: True  # type: ignore[assignment]
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: True  # type: ignore[assignment]
     mw.col = object()
@@ -253,7 +253,7 @@ def test_run_after_sync_without_followup(manager_with_profile, kanjicards_module
     manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: True  # type: ignore[assignment]
     manager_with_profile._stats_warrant_sync = lambda stats: True  # type: ignore[assignment]
-    manager_with_profile.run_sync = lambda: {"created": 1}  # type: ignore[assignment]
+    manager_with_profile.run_recalc = lambda: {"created": 1}  # type: ignore[assignment]
 
     called = {}
 
@@ -299,14 +299,14 @@ def test_on_sync_event_runs_when_config_changed(manager_with_profile, kanjicards
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
     run_calls = []
 
-    def fake_sync_internal(**kwargs):
+    def fake_recalc_internal(**kwargs):
         manager_with_profile._pending_vocab_sync_marker = (0, 0)
         current_cfg = kwargs.get("cfg", cfg)
         manager_with_profile._pending_config_hash = manager_with_profile._hash_config(current_cfg)
         run_calls.append(True)
         return {"created": 0}
 
-    manager_with_profile._sync_internal = fake_sync_internal  # type: ignore[assignment]
+    manager_with_profile._recalc_internal = fake_recalc_internal  # type: ignore[assignment]
     manager_with_profile._trigger_followup_sync = lambda: False  # type: ignore[assignment]
     mw.col = object()
     manager_with_profile._last_synced_config_hash = "previous"
@@ -339,11 +339,11 @@ def test_on_sync_event_skips_when_no_vocab_changes(manager_with_profile, tmp_pat
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
     called = {}
 
-    def fail_run_sync():
+    def fail_run_recalc():
         called["run"] = True
         return {}
 
-    manager_with_profile.run_sync = fail_run_sync  # type: ignore[assignment]
+    manager_with_profile.run_recalc = fail_run_recalc  # type: ignore[assignment]
     manager_with_profile._last_synced_config_hash = manager_with_profile._hash_config(cfg)
     mw.col = types.SimpleNamespace()
     manager_with_profile._on_sync_event()

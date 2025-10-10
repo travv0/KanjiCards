@@ -347,7 +347,7 @@ def manager_with_profile(kanjicards_module, tmp_path):
             self._config = dict(data)
             self.written_configs.append((module_name, data))
 
-    manager = kanjicards_module.KanjiVocabSyncManager.__new__(kanjicards_module.KanjiVocabSyncManager)
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir()
     addons_folder = tmp_path / "addons"
