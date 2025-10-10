@@ -141,6 +141,45 @@ def test_process_reviewed_card_triggers_vocab_update(manager, kanjicards_module,
     assert manager._pre_answer_card_state == {}
 
 
+def test_process_reviewed_card_triggers_for_review_queue(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(kanjicards_module)
+    manager.load_config = lambda: cfg
+
+    kanji_model = {"id": 10, "name": "Kanji", "flds": [{"name": "Character"}]}
+    monkeypatch.setattr(
+        manager,
+        "_get_kanji_model_context",
+        lambda *args, **kwargs: (kanji_model, {"kanji": 0}, 0),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_vocab_model_map",
+        lambda *args, **kwargs: {1: ({"id": 1}, [0])},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_existing_kanji_notes",
+        lambda *args, **kwargs: {"火": 1},
+    )
+    called = []
+    monkeypatch.setattr(
+        manager,
+        "_update_vocab_suspension",
+        lambda *args, **kwargs: called.append(kwargs["target_chars"]),
+    )
+
+    note = FakeNote(mid=10, fields=["火"], note_id=5)
+    card = FakeCard(777, note, queue=2, type_=2)
+    manager._pre_answer_card_state[777] = {"type": 2, "queue": 2, "note_id": 5}
+    manager._last_question_card_id = 777
+    manager.mw.col = types.SimpleNamespace()
+
+    manager._process_reviewed_card(card)
+
+    assert called and called[0] == {"火"}
+    assert manager._pre_answer_card_state == {}
+
+
 def test_process_reviewed_card_fetches_note_on_failure(manager, kanjicards_module, monkeypatch):
     cfg = make_config(kanjicards_module)
     manager.load_config = lambda: cfg

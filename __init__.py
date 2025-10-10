@@ -881,15 +881,6 @@ class KanjiVocabSyncManager:
         prev_type = prev_state.get("type")
         prev_queue = prev_state.get("queue")
         note_id_hint = prev_state.get("note_id")
-        was_new = (prev_queue == 0) or (prev_queue is None and prev_type == 0)
-        if not was_new:
-            self._debug(
-                "realtime/skip",
-                reason="not_new",
-                prev_type=prev_type,
-                prev_queue=prev_queue,
-            )
-            return
 
         note: Optional[Note]
         try:
