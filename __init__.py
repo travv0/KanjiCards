@@ -1035,7 +1035,6 @@ class KanjiVocabSyncManager:
             vocab_field_map,
             existing_notes,
             target_chars=kanji_chars,
-            force_chars_reviewed=kanji_chars,
         )
 
         self._realtime_error_logged = False
@@ -2305,7 +2304,6 @@ class KanjiVocabSyncManager:
         vocab_field_map: Dict[int, List[int]],
         existing_notes: Dict[str, int],
         target_chars: Optional[Set[str]] = None,
-        force_chars_reviewed: Optional[Set[str]] = None,
     ) -> Dict[str, int]:
         stats = {"vocab_suspended": 0, "vocab_unsuspended": 0}
         tag = cfg.auto_suspend_tag.strip()
@@ -2316,7 +2314,6 @@ class KanjiVocabSyncManager:
         self._debug(
             "realtime/update_start",
             target=target_display,
-            force="".join(sorted(force_chars_reviewed)) if force_chars_reviewed else "",
         )
         notes_info = self._collect_vocab_note_chars(collection, vocab_field_map, target_chars)
         if not notes_info:
@@ -2332,15 +2329,6 @@ class KanjiVocabSyncManager:
         if threshold < 0:
             threshold = 0
         kanji_status = self._compute_kanji_interval_status(collection, existing_notes)
-        force_chars_set: Set[str] = set()
-        if force_chars_reviewed:
-            force_chars_set = {char for char in force_chars_reviewed if char}
-            self._debug(
-                "realtime/status",
-                target="".join(sorted(force_chars_set)),
-                notes=len(notes_info),
-                tag=tag,
-            )
         card_map = self._load_card_status_for_notes(collection, notes_info.keys())
 
         for note_id, (chars, tag_set) in notes_info.items():
@@ -2353,8 +2341,6 @@ class KanjiVocabSyncManager:
             )
             requires_suspend = False
             for char in chars:
-                if char in force_chars_set:
-                    continue
                 status = kanji_status.get(char)
                 if status is None:
                     requires_suspend = True
@@ -2385,8 +2371,6 @@ class KanjiVocabSyncManager:
             needs_low_interval_tag = False
             if low_interval_tag and threshold > 0:
                 for char in chars:
-                    if char in force_chars_set:
-                        continue
                     status = kanji_status.get(char)
                     if not status:
                         continue

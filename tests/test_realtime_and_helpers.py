@@ -4,10 +4,27 @@ import pytest
 
 
 class FakeNote:
-    def __init__(self, mid, fields, note_id=1):
+    def __init__(self, mid, fields, note_id=1, tags=None):
         self.mid = mid
         self.fields = list(fields)
         self.id = note_id
+        self.tags = list(tags or [])
+        self.flush_count = 0
+
+    def flush(self):
+        self.flush_count += 1
+
+    def add_tag(self, tag):
+        if tag not in self.tags:
+            self.tags.append(tag)
+
+    addTag = add_tag
+
+    def remove_tag(self, tag):
+        if tag in self.tags:
+            self.tags.remove(tag)
+
+    removeTag = remove_tag
 
 
 class FakeCard:
@@ -332,6 +349,144 @@ def test_process_reviewed_card_no_kanji_chars(manager, kanjicards_module, monkey
         lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
     )
     manager._process_reviewed_card(card)
+
+
+def test_process_reviewed_card_respects_interval_threshold(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+        known_kanji_interval=10,
+    )
+    manager.load_config = lambda: cfg
+    kanji_model = {"id": 10, "name": "Kanji", "flds": [{"name": "Character"}]}
+    monkeypatch.setattr(
+        manager,
+        "_get_kanji_model_context",
+        lambda *args, **kwargs: (kanji_model, {"kanji": 0}, 0),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_vocab_model_map",
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_existing_kanji_notes",
+        lambda *args, **kwargs: {"火": 1},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {7: ({"火"}, {"NeedsSuspend"})},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(
+                has_review_card=True,
+                current_interval=5,
+                historical_interval=5,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {7: [(901, -1, 2)]},
+    )
+    note = FakeNote(mid=10, fields=["火"], note_id=7, tags=["NeedsSuspend"])
+    monkeypatch.setattr(kanjicards_module, "_get_note", lambda *args, **kwargs: note)
+    unsuspended = []
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda _collection, ids: unsuspended.extend(ids),
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        lambda *args, **kwargs: 0,
+    )
+    manager.mw.col = types.SimpleNamespace()
+    card = FakeCard(333, note)
+    manager._pre_answer_card_state[333] = {"type": 0, "queue": 0, "note_id": 7}
+    manager._last_question_card_id = 333
+
+    manager._process_reviewed_card(card)
+
+    assert unsuspended == []
+    assert "needssuspend" in {tag.lower() for tag in note.tags}
+
+
+def test_process_reviewed_card_unsuspends_when_interval_sufficient(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+        known_kanji_interval=10,
+    )
+    manager.load_config = lambda: cfg
+    kanji_model = {"id": 10, "name": "Kanji", "flds": [{"name": "Character"}]}
+    monkeypatch.setattr(
+        manager,
+        "_get_kanji_model_context",
+        lambda *args, **kwargs: (kanji_model, {"kanji": 0}, 0),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_vocab_model_map",
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_existing_kanji_notes",
+        lambda *args, **kwargs: {"火": 1},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {7: ({"火"}, {"NeedsSuspend"})},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(
+                has_review_card=True,
+                current_interval=25,
+                historical_interval=25,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {7: [(901, -1, 2)]},
+    )
+    note = FakeNote(mid=10, fields=["火"], note_id=7, tags=["NeedsSuspend"])
+    monkeypatch.setattr(kanjicards_module, "_get_note", lambda *args, **kwargs: note)
+    unsuspended = []
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda _collection, ids: unsuspended.extend(ids),
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        lambda *args, **kwargs: 0,
+    )
+    manager.mw.col = types.SimpleNamespace()
+    card = FakeCard(444, note)
+    manager._pre_answer_card_state[444] = {"type": 0, "queue": 0, "note_id": 7}
+    manager._last_question_card_id = 444
+
+    manager._process_reviewed_card(card)
+
+    assert unsuspended == [901]
+    assert "needssuspend" not in {tag.lower() for tag in note.tags}
 
 
 def test_stats_warrant_sync_checks_keys(manager):
