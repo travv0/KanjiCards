@@ -1,6 +1,7 @@
 import sys
 import types
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -231,7 +232,6 @@ def test_prioritysieve_recalc_runs_kanjicards_afterwards(manager_with_profile, m
 
     manager_with_profile.run_after_sync = lambda *args, **kwargs: events.append("kanjicards")  # type: ignore[assignment]
     manager_with_profile._prioritysieve_waiting_post_sync = True
-    manager_with_profile._prioritysieve_toolbar_triggered = False
 
     manager_with_profile._maybe_wrap_prioritysieve_recalc(fake_module)
 
@@ -271,7 +271,6 @@ def test_prioritysieve_recalc_skips_kanjicards_when_not_waiting(manager_with_pro
 
     manager_with_profile.run_after_sync = lambda *args, **kwargs: events.append("kanjicards")  # type: ignore[assignment]
     manager_with_profile._prioritysieve_waiting_post_sync = False
-    manager_with_profile._prioritysieve_toolbar_triggered = False
 
     manager_with_profile._maybe_wrap_prioritysieve_recalc(fake_module)
 
@@ -280,7 +279,7 @@ def test_prioritysieve_recalc_skips_kanjicards_when_not_waiting(manager_with_pro
     assert events == ["priority_recalc"]
 
 
-def test_prioritysieve_toolbar_runs_both(manager_with_profile, monkeypatch):
+def test_toolbar_recalc_runs_priority_then_kanjicards(manager_with_profile, monkeypatch):
     events: list[str] = []
 
     class FakeRecalcMainModule(types.ModuleType):
@@ -305,23 +304,16 @@ def test_prioritysieve_toolbar_runs_both(manager_with_profile, monkeypatch):
     monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
 
     manager_with_profile.mw.taskman = FakeTaskman()
-
     manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
 
-    def toolbar_handler():
-        events.append("toolbar_handler")
-        return fake_module.recalc()
+    manager_with_profile.run_toolbar_recalc()
 
-    manager_with_profile._maybe_wrap_prioritysieve_recalc(fake_module)
-    wrapped = manager_with_profile._wrap_prioritysieve_toolbar_handler(toolbar_handler)
-
-    wrapped()
-
-    assert events == ["toolbar_handler", "priority_recalc", "kanjicards"]
+    assert events == ["priority_recalc", "kanjicards"]
 
 
-def test_prioritysieve_toolbar_runs_after_async_completion(manager_with_profile, monkeypatch):
+def test_toolbar_recalc_waits_for_async_completion(manager_with_profile, monkeypatch):
     events: list[str] = []
+    scheduled: list[Callable[[], None]] = []
 
     class FakeRecalcMainModule(types.ModuleType):
         def __init__(self) -> None:
@@ -336,6 +328,9 @@ def test_prioritysieve_toolbar_runs_after_async_completion(manager_with_profile,
             events.append("priority_recalc")
             self.pending_callback = self._followup_sync_callback
 
+        def recalc_in_progress(self):
+            return self.pending_callback is not None
+
     fake_module = FakeRecalcMainModule()
 
     monkeypatch.setitem(sys.modules, "prioritysieve", types.ModuleType("prioritysieve"))
@@ -343,24 +338,80 @@ def test_prioritysieve_toolbar_runs_after_async_completion(manager_with_profile,
     monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
 
     manager_with_profile.mw.taskman = FakeTaskman()
-
     manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
 
-    def toolbar_handler():
-        events.append("toolbar_handler")
-        return fake_module.recalc()
+    def call_later(callback, delay_ms=0):
+        if delay_ms <= 0:
+            callback()
+        else:
+            scheduled.append(callback)
 
-    manager_with_profile._maybe_wrap_prioritysieve_recalc(fake_module)
-    wrapped = manager_with_profile._wrap_prioritysieve_toolbar_handler(toolbar_handler)
+    manager_with_profile._call_later = call_later  # type: ignore[assignment]
 
-    wrapped()
+    manager_with_profile.run_toolbar_recalc()
 
-    assert events == ["toolbar_handler", "priority_recalc"]
-
+    assert events == ["priority_recalc"]
     assert callable(fake_module.pending_callback)
+
     fake_module.pending_callback()
 
-    assert events == ["toolbar_handler", "priority_recalc", "kanjicards"]
+    assert events == ["priority_recalc", "kanjicards"]
+
+    while scheduled:
+        scheduled.pop()()
+
+
+def test_toolbar_recalc_handles_missing_priority(manager_with_profile, monkeypatch):
+    for key in list(sys.modules):
+        if key.startswith("prioritysieve"):
+            monkeypatch.delitem(sys.modules, key, raising=False)
+
+    events: list[str] = []
+    manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
+
+    manager_with_profile.run_toolbar_recalc()
+
+    assert events == ["kanjicards"]
+
+
+def test_toolbar_recalc_repeats(manager_with_profile, monkeypatch):
+    events: list[str] = []
+
+    class FakeRecalcMainModule(types.ModuleType):
+        def __init__(self) -> None:
+            super().__init__("prioritysieve.recalc.recalc_main")
+            self._followup_sync_callback = None
+            self._calls = 0
+
+        def set_followup_sync_callback(self, callback):
+            self._followup_sync_callback = callback
+
+        def recalc(self):
+            self._calls += 1
+            events.append(f"priority_recalc_{self._calls}")
+            if self._followup_sync_callback is not None:
+                callback = self._followup_sync_callback
+                self._followup_sync_callback = None
+                callback()
+
+    fake_module = FakeRecalcMainModule()
+
+    monkeypatch.setitem(sys.modules, "prioritysieve", types.ModuleType("prioritysieve"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc", types.ModuleType("prioritysieve.recalc"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
+
+    manager_with_profile.mw.taskman = FakeTaskman()
+    manager_with_profile.run_recalc = lambda: events.append(f"kanjicards_{fake_module._calls}")  # type: ignore[assignment]
+
+    manager_with_profile.run_toolbar_recalc()
+    manager_with_profile.run_toolbar_recalc()
+
+    assert events == [
+        "priority_recalc_1",
+        "kanjicards_1",
+        "priority_recalc_2",
+        "kanjicards_2",
+    ]
 
 def test_show_settings_uses_dialog(manager_with_profile, kanjicards_module, monkeypatch):
     recorded = {}
