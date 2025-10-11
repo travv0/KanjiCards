@@ -317,6 +317,20 @@ def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicard
     assert delays.count(200) >= 2
 
 
+def test_on_sync_event_skips_when_prioritysieve_enabled(manager_with_profile, monkeypatch):
+    run_calls = {}
+
+    def fake_run_after_sync(*args, **kwargs):
+        run_calls["called"] = True
+
+    manager_with_profile.run_after_sync = fake_run_after_sync  # type: ignore[assignment]
+    monkeypatch.setattr(manager_with_profile, "_prioritysieve_post_sync_active", lambda: True)
+
+    manager_with_profile._on_sync_event()
+
+    assert run_calls == {}
+
+
 def test_run_after_sync_without_followup(manager_with_profile, kanjicards_module, tmp_path):
     mw = FakeMainWindow(tmp_path)
     manager_with_profile.mw = mw

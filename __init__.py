@@ -738,6 +738,26 @@ class KanjiVocabRecalcManager:
         setattr(ps_main, "_kanjicards_recalc_wrapper_installed", True)
         self._prioritysieve_recalc_wrapped = True
 
+    def _prioritysieve_post_sync_active(self) -> bool:
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main is None:
+            return False
+        try:
+            config_module = __import__("prioritysieve.prioritysieve_config", fromlist=["PrioritySieveConfig"])
+        except Exception:
+            return False
+        config_cls = getattr(config_module, "PrioritySieveConfig", None)
+        if config_cls is None:
+            return False
+        try:
+            config = config_cls()
+        except Exception:
+            return False
+        try:
+            return bool(getattr(config, "recalc_after_sync"))
+        except Exception:
+            return False
+
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
         ps_main = self._prioritysieve_recalc_main()
         if ps_main:
@@ -1250,6 +1270,8 @@ class KanjiVocabRecalcManager:
         self._realtime_error_logged = False
 
     def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
+        if self._prioritysieve_post_sync_active():
+            return
         self.run_after_sync()
 
     def run_after_sync(
