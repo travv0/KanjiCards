@@ -118,6 +118,7 @@ SCHEDULING_FIELD_DEFAULT_NAME = "KanjiCards Scheduling Info"
 
 KANJICARDS_TOOLBAR_CMD = "kanjicards_recalc"
 KANJICARDS_TOOLBAR_ID = "kanjicards_recalc_toolbar"
+PRIORITYSIEVE_TOOLBAR_CMD = "recalc_toolbar"
 
 
 def _safe_print(*args: object, **kwargs: Any) -> None:
@@ -238,6 +239,7 @@ class KanjiVocabRecalcManager:
         self._pending_config_hash: Optional[str] = None
         self._recalc_action = None
         self._prioritysieve_recalc_wrapped = False
+        self._prioritysieve_toolbar_triggered = False
         self._prioritysieve_waiting_post_sync = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
@@ -734,10 +736,11 @@ class KanjiVocabRecalcManager:
             try:
                 ps_main.set_followup_sync_callback(_after_prioritysieve_recalc)
             except Exception:
+                result = _call_original()
                 manager._handle_prioritysieve_recalc_completed()
-                return _call_original()
+                return result
             try:
-                return _call_original()
+                result = _call_original()
             except Exception:
                 try:
                     ps_main.set_followup_sync_callback(previous_callback)
@@ -745,6 +748,8 @@ class KanjiVocabRecalcManager:
                     pass
                 manager._handle_prioritysieve_recalc_completed()
                 raise
+            manager._handle_prioritysieve_recalc_completed()
+            return result
 
         setattr(ps_main, "recalc", wrapped_recalc)
         setattr(ps_main, "_kanjicards_recalc_wrapper_installed", True)
@@ -796,9 +801,18 @@ class KanjiVocabRecalcManager:
         return bool(setting_value)
 
     def _handle_prioritysieve_recalc_completed(self) -> None:
-        if not getattr(self, "_prioritysieve_waiting_post_sync", False):
+        pending_sync = getattr(self, "_prioritysieve_waiting_post_sync", False)
+        pending_toolbar = getattr(self, "_prioritysieve_toolbar_triggered", False)
+        if not (pending_sync or pending_toolbar):
             return
         self._prioritysieve_waiting_post_sync = False
+        self._prioritysieve_toolbar_triggered = False
+        if pending_toolbar:
+            try:
+                self.run_recalc()
+            except Exception:
+                pass
+            return
         self.run_after_sync()
 
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
@@ -826,8 +840,25 @@ class KanjiVocabRecalcManager:
         if not isinstance(link_handlers, dict):
             return
         self._maybe_wrap_prioritysieve_recalc()
+        ps_handler = link_handlers.get(PRIORITYSIEVE_TOOLBAR_CMD)
+        if callable(ps_handler) and not getattr(ps_handler, "_kanjicards_toolbar_wrapper", False):
+            link_handlers[PRIORITYSIEVE_TOOLBAR_CMD] = self._wrap_prioritysieve_toolbar_handler(ps_handler)
         if KANJICARDS_TOOLBAR_CMD in link_handlers:
             link_handlers[KANJICARDS_TOOLBAR_CMD] = self.run_recalc
+
+    def _wrap_prioritysieve_toolbar_handler(self, original: Callable[..., object]) -> Callable[..., object]:
+        manager = self
+
+        @wraps(original)
+        def wrapped(*args: object, **kwargs: object) -> object:
+            manager._prioritysieve_toolbar_triggered = True
+            try:
+                return original(*args, **kwargs)
+            finally:
+                manager._prioritysieve_toolbar_triggered = False
+
+        setattr(wrapped, "_kanjicards_toolbar_wrapper", True)
+        return wrapped
 
     # ------------------------------------------------------------------
     # Recalc routine
@@ -1315,8 +1346,10 @@ class KanjiVocabRecalcManager:
     def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
         if self._prioritysieve_post_sync_active():
             self._prioritysieve_waiting_post_sync = True
+            self._prioritysieve_toolbar_triggered = False
             return
         self._prioritysieve_waiting_post_sync = False
+        self._prioritysieve_toolbar_triggered = False
         self.run_after_sync()
 
     def run_after_sync(
