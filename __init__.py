@@ -702,6 +702,13 @@ class KanjiVocabRecalcManager:
         @wraps(original_recalc)
         def wrapped_recalc(*args: object, **kwargs: object) -> object:
             previous_callback = getattr(ps_main, "_followup_sync_callback", None)
+            completion_state: Dict[str, bool] = {"done": False}
+
+            def _mark_completed() -> None:
+                if completion_state.get("done"):
+                    return
+                completion_state["done"] = True
+                manager._run_on_main(manager._handle_prioritysieve_recalc_completed)
 
             def _call_original() -> object:
                 try:
@@ -722,22 +729,17 @@ class KanjiVocabRecalcManager:
                     except Exception:
                         pass
                     finally:
-                        manager._handle_prioritysieve_recalc_completed()
+                        _mark_completed()
 
-                taskman = getattr(manager.mw, "taskman", None)
-                if taskman and hasattr(taskman, "run_on_main"):
-                    try:
-                        taskman.run_on_main(_finish)
-                        return
-                    except Exception:
-                        pass
-                _finish()
+                manager._run_on_main(_finish)
 
             try:
                 ps_main.set_followup_sync_callback(_after_prioritysieve_recalc)
             except Exception:
                 result = _call_original()
-                manager._handle_prioritysieve_recalc_completed()
+                if callable(previous_callback):
+                    manager._run_on_main(previous_callback)
+                _mark_completed()
                 return result
             try:
                 result = _call_original()
@@ -746,13 +748,81 @@ class KanjiVocabRecalcManager:
                     ps_main.set_followup_sync_callback(previous_callback)
                 except Exception:
                     pass
-                manager._handle_prioritysieve_recalc_completed()
+                _mark_completed()
                 raise
+            if not completion_state.get("done"):
+                manager._schedule_prioritysieve_completion_check(ps_main, completion_state)
             return result
 
         setattr(ps_main, "recalc", wrapped_recalc)
         setattr(ps_main, "_kanjicards_recalc_wrapper_installed", True)
         self._prioritysieve_recalc_wrapped = True
+
+    def _run_on_main(self, callback: Callable[[], None]) -> None:
+        try:
+            taskman = getattr(self.mw, "taskman", None)
+            if taskman and hasattr(taskman, "run_on_main"):
+                try:
+                    taskman.run_on_main(callback)
+                    return
+                except Exception:
+                    pass
+            callback()
+        except Exception:
+            pass
+
+    def _call_later(self, callback: Callable[[], None], delay_ms: int = 0) -> None:
+        if delay_ms <= 0:
+            self._run_on_main(callback)
+            return
+        try:
+            QTimer.singleShot(delay_ms, callback)
+            return
+        except Exception:
+            pass
+        try:
+            import threading
+
+            timer = threading.Timer(delay_ms / 1000.0, lambda: self._run_on_main(callback))
+            timer.daemon = True
+            timer.start()
+        except Exception:
+            pass
+
+    def _schedule_prioritysieve_completion_check(
+        self,
+        ps_main: ModuleType,
+        completion_state: Dict[str, bool],
+        *,
+        delay_ms: int = 200,
+    ) -> None:
+        if completion_state.get("done"):
+            return
+
+        def _check() -> None:
+            if completion_state.get("done"):
+                return
+            recalc_in_progress = getattr(ps_main, "recalc_in_progress", None)
+            should_wait = False
+            if callable(recalc_in_progress):
+                try:
+                    should_wait = bool(recalc_in_progress())
+                except Exception:
+                    should_wait = False
+            else:
+                remaining = completion_state.get("fallback_waits", 2)
+                if remaining > 0:
+                    completion_state["fallback_waits"] = remaining - 1
+                    should_wait = True
+            if should_wait:
+                self._call_later(_check, delay_ms)
+                return
+            if completion_state.get("done"):
+                return
+            completion_state["done"] = True
+            self._run_on_main(self._handle_prioritysieve_recalc_completed)
+
+        self._call_later(_check, delay_ms)
 
     def _prioritysieve_post_sync_active(self) -> bool:
         ps_main = self._prioritysieve_recalc_main()
