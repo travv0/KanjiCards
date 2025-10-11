@@ -696,6 +696,7 @@ class KanjiVocabRecalcManager:
         original_recalc = getattr(ps_main, "recalc", None)
         if not callable(original_recalc):
             return
+        self._ensure_prioritysieve_completion_hooks(ps_main)
 
         manager = self
 
@@ -823,6 +824,29 @@ class KanjiVocabRecalcManager:
             self._run_on_main(self._handle_prioritysieve_recalc_completed)
 
         self._call_later(_check, delay_ms)
+
+    def _ensure_prioritysieve_completion_hooks(self, ps_main: ModuleType) -> None:
+        self._wrap_prioritysieve_completion_hook(ps_main, "_on_success")
+        self._wrap_prioritysieve_completion_hook(ps_main, "_on_failure")
+
+    def _wrap_prioritysieve_completion_hook(self, ps_main: ModuleType, attr_name: str) -> None:
+        original = getattr(ps_main, attr_name, None)
+        if not callable(original):
+            return
+        if getattr(original, "_kanjicards_completion_wrapper", False):
+            return
+
+        manager = self
+
+        @wraps(original)
+        def wrapped(*args: object, **kwargs: object) -> object:
+            try:
+                return original(*args, **kwargs)
+            finally:
+                manager._run_on_main(manager._handle_prioritysieve_recalc_completed)
+
+        setattr(wrapped, "_kanjicards_completion_wrapper", True)
+        setattr(ps_main, attr_name, wrapped)
 
     def _prioritysieve_post_sync_active(self) -> bool:
         ps_main = self._prioritysieve_recalc_main()
