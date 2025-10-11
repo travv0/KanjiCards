@@ -84,6 +84,7 @@ def real_env(tmp_path_factory):
     manager._sync_hook_target = None
     manager._profile_config_error_logged = False
     manager._profile_state_error_logged = False
+    manager._prioritysieve_waiting_post_sync = False
     manager._pre_answer_card_state = {}
     manager._last_question_card_id = None
     manager._debug_enabled = False

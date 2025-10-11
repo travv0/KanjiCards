@@ -238,6 +238,7 @@ class KanjiVocabRecalcManager:
         self._pending_config_hash: Optional[str] = None
         self._recalc_action = None
         self._prioritysieve_recalc_wrapped = False
+        self._prioritysieve_waiting_post_sync = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -700,6 +701,17 @@ class KanjiVocabRecalcManager:
         def wrapped_recalc(*args: object, **kwargs: object) -> object:
             previous_callback = getattr(ps_main, "_followup_sync_callback", None)
 
+            def _call_original() -> object:
+                try:
+                    return original_recalc(*args, **kwargs)
+                except TypeError as err:
+                    if args or kwargs:
+                        try:
+                            return original_recalc()
+                        except TypeError:
+                            raise err
+                    raise
+
             def _after_prioritysieve_recalc() -> None:
                 def _finish() -> None:
                     try:
@@ -708,7 +720,7 @@ class KanjiVocabRecalcManager:
                     except Exception:
                         pass
                     finally:
-                        manager.run_recalc()
+                        manager._handle_prioritysieve_recalc_completed()
 
                 taskman = getattr(manager.mw, "taskman", None)
                 if taskman and hasattr(taskman, "run_on_main"):
@@ -722,16 +734,16 @@ class KanjiVocabRecalcManager:
             try:
                 ps_main.set_followup_sync_callback(_after_prioritysieve_recalc)
             except Exception:
-                manager.run_recalc()
-                return original_recalc(*args, **kwargs)
+                manager._handle_prioritysieve_recalc_completed()
+                return _call_original()
             try:
-                return original_recalc(*args, **kwargs)
+                return _call_original()
             except Exception:
                 try:
                     ps_main.set_followup_sync_callback(previous_callback)
                 except Exception:
                     pass
-                manager.run_recalc()
+                manager._handle_prioritysieve_recalc_completed()
                 raise
 
         setattr(ps_main, "recalc", wrapped_recalc)
@@ -782,6 +794,12 @@ class KanjiVocabRecalcManager:
             normalized_setting = setting_value.strip().lower()
             return normalized_setting in {"true", "1", "yes", "on"}
         return bool(setting_value)
+
+    def _handle_prioritysieve_recalc_completed(self) -> None:
+        if not getattr(self, "_prioritysieve_waiting_post_sync", False):
+            return
+        self._prioritysieve_waiting_post_sync = False
+        self.run_after_sync()
 
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
         ps_main = self._prioritysieve_recalc_main()
@@ -1296,7 +1314,9 @@ class KanjiVocabRecalcManager:
 
     def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
         if self._prioritysieve_post_sync_active():
+            self._prioritysieve_waiting_post_sync = True
             return
+        self._prioritysieve_waiting_post_sync = False
         self.run_after_sync()
 
     def run_after_sync(
@@ -1306,6 +1326,7 @@ class KanjiVocabRecalcManager:
         on_finished: Optional[Callable[[bool], None]] = None,
     ) -> None:
         callback = on_finished or (lambda _changed: None)
+        self._prioritysieve_waiting_post_sync = False
         if self._suppress_next_auto_sync:
             self._suppress_next_auto_sync = False
             callback(False)

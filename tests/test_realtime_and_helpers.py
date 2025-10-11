@@ -67,6 +67,7 @@ def manager(kanjicards_module):
     manager.mw = types.SimpleNamespace()
     manager._profile_config_error_logged = False
     manager._profile_state_error_logged = False
+    manager._prioritysieve_waiting_post_sync = False
     manager._debug_enabled = False
     manager._debug_path = None
     manager._pre_answer_card_state = {}

@@ -32,6 +32,7 @@ def manager(kanjicards_module, tmp_path):
     manager._last_synced_config_hash = None
     manager._pending_config_hash = None
     manager._suppress_next_auto_sync = False
+    manager._prioritysieve_waiting_post_sync = False
     return manager
 
 
