@@ -930,7 +930,9 @@ class KanjiVocabRecalcManager:
         if ps_main:
             self._maybe_wrap_prioritysieve_recalc(ps_main)
             if PRIORITYSIEVE_TOOLBAR_CMD in link_handlers:
-                link_handlers[PRIORITYSIEVE_TOOLBAR_CMD] = self.run_toolbar_recalc
+                ps_handler = link_handlers.get(PRIORITYSIEVE_TOOLBAR_CMD)
+                if callable(ps_handler) and not getattr(ps_handler, "_kanjicards_toolbar_wrapper", False):
+                    link_handlers[PRIORITYSIEVE_TOOLBAR_CMD] = self._wrap_prioritysieve_toolbar_handler(ps_handler)
             link_handlers.pop(KANJICARDS_TOOLBAR_CMD, None)
             return
         self._maybe_wrap_prioritysieve_recalc()
@@ -956,6 +958,16 @@ class KanjiVocabRecalcManager:
             self._prioritysieve_toolbar_followup = False
             self.run_recalc()
             return
+
+    def _wrap_prioritysieve_toolbar_handler(self, original: Callable[..., object]) -> Callable[..., object]:
+        manager = self
+
+        @wraps(original)
+        def wrapped(*args: object, **kwargs: object) -> object:
+            return manager.run_toolbar_recalc()
+
+        setattr(wrapped, "_kanjicards_toolbar_wrapper", True)
+        return wrapped
 
     def run_recalc(self) -> None:
         self.mw.checkpoint("KanjiCards")
