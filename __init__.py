@@ -852,10 +852,7 @@ class KanjiVocabRecalcManager:
         @wraps(original)
         def wrapped(*args: object, **kwargs: object) -> object:
             manager._prioritysieve_toolbar_triggered = True
-            try:
-                return original(*args, **kwargs)
-            finally:
-                manager._prioritysieve_toolbar_triggered = False
+            return original(*args, **kwargs)
 
         setattr(wrapped, "_kanjicards_toolbar_wrapper", True)
         return wrapped
