@@ -199,6 +199,62 @@ def test_toolbar_link_added_without_prioritysieve(manager_with_profile, monkeypa
     assert calls == ["kanjicards"]
 
 
+def test_toolbar_link_shared_with_prioritysieve(manager_with_profile, monkeypatch, kanjicards_module):
+    events: list[str] = []
+
+    class FakeRecalcMainModule(types.ModuleType):
+        def __init__(self) -> None:
+            super().__init__("prioritysieve.recalc.recalc_main")
+            self._followup_sync_callback = None
+
+        def set_followup_sync_callback(self, callback):
+            self._followup_sync_callback = callback
+
+        def recalc(self):
+            events.append("priority_recalc")
+            if self._followup_sync_callback is not None:
+                callback = self._followup_sync_callback
+                self._followup_sync_callback = None
+                callback()
+
+    fake_module = FakeRecalcMainModule()
+
+    monkeypatch.setitem(sys.modules, "prioritysieve", types.ModuleType("prioritysieve"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc", types.ModuleType("prioritysieve.recalc"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
+
+    manager_with_profile.mw.taskman = FakeTaskman()
+    manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
+
+    toolbar = FakeToolbar()
+    priority_handler_calls: list[str] = []
+
+    def priority_handler():
+        priority_handler_calls.append("priority_handler")
+        events.append("priority_handler")
+
+    link = toolbar.create_link(
+        kanjicards_module.PRIORITYSIEVE_TOOLBAR_CMD,
+        "Priority Recalc",
+        priority_handler,
+    )
+    links = [link]
+
+    manager_with_profile._on_top_toolbar_init_links(links, toolbar)
+
+    assert len(links) == 1
+    assert kanjicards_module.KANJICARDS_TOOLBAR_ID not in links[0]
+
+    manager_with_profile._on_toolbar_did_redraw(toolbar)
+    assert kanjicards_module.KANJICARDS_TOOLBAR_CMD not in toolbar.link_handlers
+
+    handler = toolbar.link_handlers[kanjicards_module.PRIORITYSIEVE_TOOLBAR_CMD]
+    handler()
+
+    assert events == ["priority_recalc", "kanjicards"]
+    assert priority_handler_calls == []
+
+
 def test_prioritysieve_recalc_runs_kanjicards_afterwards(manager_with_profile, monkeypatch):
     events: list[str] = []
 

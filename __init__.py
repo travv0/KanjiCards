@@ -968,11 +968,12 @@ class KanjiVocabRecalcManager:
 
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
         ps_main = self._prioritysieve_recalc_main()
-        if ps_main:
-            self._maybe_wrap_prioritysieve_recalc(ps_main)
         for index in range(len(links) - 1, -1, -1):
             if f'id="{KANJICARDS_TOOLBAR_ID}"' in links[index]:
                 links.pop(index)
+        if ps_main:
+            self._maybe_wrap_prioritysieve_recalc(ps_main)
+            return
         link = toolbar.create_link(
             cmd=KANJICARDS_TOOLBAR_CMD,
             label="Recalc",
@@ -985,6 +986,13 @@ class KanjiVocabRecalcManager:
     def _on_toolbar_did_redraw(self, toolbar: Toolbar) -> None:
         link_handlers = getattr(toolbar, "link_handlers", None)
         if not isinstance(link_handlers, dict):
+            return
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main:
+            self._maybe_wrap_prioritysieve_recalc(ps_main)
+            if PRIORITYSIEVE_TOOLBAR_CMD in link_handlers:
+                link_handlers[PRIORITYSIEVE_TOOLBAR_CMD] = self.run_toolbar_recalc
+            link_handlers.pop(KANJICARDS_TOOLBAR_CMD, None)
             return
         self._maybe_wrap_prioritysieve_recalc()
         if KANJICARDS_TOOLBAR_CMD in link_handlers:
