@@ -902,7 +902,9 @@ class KanjiVocabRecalcManager:
         for index in range(len(links) - 1, -1, -1):
             if f'id="{KANJICARDS_TOOLBAR_ID}"' in links[index]:
                 links.pop(index)
-        label = "KC Recalc" if ps_available else "Recalc"
+        if ps_available:
+            return
+        label = "Recalc"
         link = toolbar.create_link(
             cmd=KANJICARDS_TOOLBAR_CMD,
             label=label,

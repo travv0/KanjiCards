@@ -199,7 +199,7 @@ def test_toolbar_link_added_without_prioritysieve(manager_with_profile, monkeypa
     assert calls == ["kanjicards"]
 
 
-def test_toolbar_links_coexist_with_prioritysieve(manager_with_profile, monkeypatch, kanjicards_module):
+def test_toolbar_skips_when_prioritysieve_installed(manager_with_profile, monkeypatch, kanjicards_module):
     events: list[str] = []
 
     monkeypatch.setitem(sys.modules, "prioritysieve", types.ModuleType("prioritysieve"))
@@ -236,19 +236,17 @@ def test_toolbar_links_coexist_with_prioritysieve(manager_with_profile, monkeypa
 
     manager_with_profile._on_top_toolbar_init_links(links, toolbar)
 
-    assert any('id="kanjicards_recalc_toolbar"' in link for link in links)
-    assert any(">KC Recalc<" in link for link in links)
+    assert not any('id="kanjicards_recalc_toolbar"' in link for link in links)
+    assert not any(">Recalc<" in link for link in links)
 
     manager_with_profile._on_toolbar_did_redraw(toolbar)
 
     ps_handler = toolbar.link_handlers[kanjicards_module.PRIORITYSIEVE_TOOLBAR_CMD]
-    kc_handler = toolbar.link_handlers[kanjicards_module.KANJICARDS_TOOLBAR_CMD]
 
     ps_handler()
     assert events == ["priority_recalc"]
 
-    kc_handler()
-    assert events == ["priority_recalc", "kanjicards"]
+    assert kanjicards_module.KANJICARDS_TOOLBAR_CMD not in toolbar.link_handlers
 
 
 def test_prioritysieve_recalc_runs_kanjicards_afterwards(manager_with_profile, monkeypatch):
