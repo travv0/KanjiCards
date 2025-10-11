@@ -742,6 +742,25 @@ class KanjiVocabRecalcManager:
         ps_main = self._prioritysieve_recalc_main()
         if ps_main is None:
             return False
+        addon_manager = getattr(self.mw, "addonManager", None)
+        get_config = getattr(addon_manager, "getConfig", None) if addon_manager else None
+        if callable(get_config):
+            for module_name in ("prioritysieve", "prioritysieve.__init__"):
+                try:
+                    raw_config = get_config(module_name)
+                except Exception:
+                    continue
+                if not isinstance(raw_config, dict):
+                    continue
+                setting = raw_config.get("recalc_after_sync")
+                if isinstance(setting, bool):
+                    return setting
+                if isinstance(setting, str):
+                    normalized = setting.strip().lower()
+                    if normalized in {"true", "1", "yes", "on"}:
+                        return True
+                    if normalized in {"false", "0", "no", "off"}:
+                        return False
         try:
             config_module = __import__("prioritysieve.prioritysieve_config", fromlist=["PrioritySieveConfig"])
         except Exception:
@@ -754,9 +773,15 @@ class KanjiVocabRecalcManager:
         except Exception:
             return False
         try:
-            return bool(getattr(config, "recalc_after_sync"))
+            setting_value = getattr(config, "recalc_after_sync")
         except Exception:
             return False
+        if isinstance(setting_value, bool):
+            return setting_value
+        if isinstance(setting_value, str):
+            normalized_setting = setting_value.strip().lower()
+            return normalized_setting in {"true", "1", "yes", "on"}
+        return bool(setting_value)
 
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
         ps_main = self._prioritysieve_recalc_main()

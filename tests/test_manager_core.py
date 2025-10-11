@@ -331,6 +331,27 @@ def test_on_sync_event_skips_when_prioritysieve_enabled(manager_with_profile, mo
     assert run_calls == {}
 
 
+def test_prioritysieve_post_sync_active_reads_config(manager_with_profile, monkeypatch):
+    monkeypatch.setattr(manager_with_profile, "_prioritysieve_recalc_main", lambda: object())
+    addon_manager = manager_with_profile.mw.addonManager
+
+    def config_with_post_sync(module_name: str) -> dict:
+        if module_name == "prioritysieve":
+            return {"recalc_after_sync": True}
+        return {}
+
+    monkeypatch.setattr(addon_manager, "getConfig", config_with_post_sync)
+    assert manager_with_profile._prioritysieve_post_sync_active() is True
+
+    def config_without_post_sync(module_name: str) -> dict:
+        if module_name == "prioritysieve":
+            return {"recalc_after_sync": False}
+        return {}
+
+    monkeypatch.setattr(addon_manager, "getConfig", config_without_post_sync)
+    assert manager_with_profile._prioritysieve_post_sync_active() is False
+
+
 def test_run_after_sync_without_followup(manager_with_profile, kanjicards_module, tmp_path):
     mw = FakeMainWindow(tmp_path)
     manager_with_profile.mw = mw
