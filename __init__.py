@@ -898,12 +898,14 @@ class KanjiVocabRecalcManager:
             self.run_after_sync()
 
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
+        ps_available = self._prioritysieve_recalc_main() is not None
         for index in range(len(links) - 1, -1, -1):
             if f'id="{KANJICARDS_TOOLBAR_ID}"' in links[index]:
                 links.pop(index)
+        label = "KC Recalc" if ps_available else "Recalc"
         link = toolbar.create_link(
             cmd=KANJICARDS_TOOLBAR_CMD,
-            label="KC Recalc",
+            label=label,
             func=self.run_recalc,
             tip="Recalculate Kanji cards",
             id=KANJICARDS_TOOLBAR_ID,
@@ -914,6 +916,9 @@ class KanjiVocabRecalcManager:
         link_handlers = getattr(toolbar, "link_handlers", None)
         if not isinstance(link_handlers, dict):
             return
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main is not None:
+            self._maybe_wrap_prioritysieve_recalc(ps_main)
         if KANJICARDS_TOOLBAR_CMD in link_handlers:
             link_handlers[KANJICARDS_TOOLBAR_CMD] = self.run_recalc
 

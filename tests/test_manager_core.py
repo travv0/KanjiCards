@@ -186,7 +186,7 @@ def test_toolbar_link_added_without_prioritysieve(manager_with_profile, monkeypa
     manager_with_profile._on_top_toolbar_init_links(links, toolbar)
 
     assert any('id="kanjicards_recalc_toolbar"' in link for link in links)
-    assert any(">KC Recalc<" in link for link in links)
+    assert any(">Recalc<" in link for link in links)
 
     calls: list[str] = []
     manager_with_profile.run_recalc = lambda: calls.append("kanjicards")  # type: ignore[assignment]
@@ -205,20 +205,32 @@ def test_toolbar_links_coexist_with_prioritysieve(manager_with_profile, monkeypa
     monkeypatch.setitem(sys.modules, "prioritysieve", types.ModuleType("prioritysieve"))
     monkeypatch.setitem(sys.modules, "prioritysieve.recalc", types.ModuleType("prioritysieve.recalc"))
 
-    fake_module = types.ModuleType("prioritysieve.recalc.recalc_main")
+    class FakeRecalcMainModule(types.ModuleType):
+        def __init__(self) -> None:
+            super().__init__("prioritysieve.recalc.recalc_main")
+            self._followup_sync_callback = None
+
+        def set_followup_sync_callback(self, callback):
+            self._followup_sync_callback = callback
+
+        def recalc(self):
+            events.append("priority_recalc")
+            if callable(self._followup_sync_callback):
+                callback = self._followup_sync_callback
+                self._followup_sync_callback = None
+                callback()
+
+    fake_module = FakeRecalcMainModule()
     monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
 
     manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
 
     toolbar = FakeToolbar()
 
-    def priority_handler():
-        events.append("priority_recalc")
-
     link = toolbar.create_link(
         kanjicards_module.PRIORITYSIEVE_TOOLBAR_CMD,
-        "Priority Recalc",
-        priority_handler,
+        "PS Recalc",
+        fake_module.recalc,
     )
     links = [link]
 
