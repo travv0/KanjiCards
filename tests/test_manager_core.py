@@ -319,6 +319,49 @@ def test_prioritysieve_toolbar_runs_both(manager_with_profile, monkeypatch):
 
     assert events == ["toolbar_handler", "priority_recalc", "kanjicards"]
 
+
+def test_prioritysieve_toolbar_runs_after_async_completion(manager_with_profile, monkeypatch):
+    events: list[str] = []
+
+    class FakeRecalcMainModule(types.ModuleType):
+        def __init__(self) -> None:
+            super().__init__("prioritysieve.recalc.recalc_main")
+            self._followup_sync_callback = None
+            self.pending_callback = None
+
+        def set_followup_sync_callback(self, callback):
+            self._followup_sync_callback = callback
+
+        def recalc(self):
+            events.append("priority_recalc")
+            self.pending_callback = self._followup_sync_callback
+
+    fake_module = FakeRecalcMainModule()
+
+    monkeypatch.setitem(sys.modules, "prioritysieve", types.ModuleType("prioritysieve"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc", types.ModuleType("prioritysieve.recalc"))
+    monkeypatch.setitem(sys.modules, "prioritysieve.recalc.recalc_main", fake_module)
+
+    manager_with_profile.mw.taskman = FakeTaskman()
+
+    manager_with_profile.run_recalc = lambda: events.append("kanjicards")  # type: ignore[assignment]
+
+    def toolbar_handler():
+        events.append("toolbar_handler")
+        return fake_module.recalc()
+
+    manager_with_profile._maybe_wrap_prioritysieve_recalc(fake_module)
+    wrapped = manager_with_profile._wrap_prioritysieve_toolbar_handler(toolbar_handler)
+
+    wrapped()
+
+    assert events == ["toolbar_handler", "priority_recalc"]
+
+    assert callable(fake_module.pending_callback)
+    fake_module.pending_callback()
+
+    assert events == ["toolbar_handler", "priority_recalc", "kanjicards"]
+
 def test_show_settings_uses_dialog(manager_with_profile, kanjicards_module, monkeypatch):
     recorded = {}
 

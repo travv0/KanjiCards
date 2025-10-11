@@ -748,7 +748,6 @@ class KanjiVocabRecalcManager:
                     pass
                 manager._handle_prioritysieve_recalc_completed()
                 raise
-            manager._handle_prioritysieve_recalc_completed()
             return result
 
         setattr(ps_main, "recalc", wrapped_recalc)
