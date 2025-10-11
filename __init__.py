@@ -226,6 +226,7 @@ class KanjiVocabRecalcManager:
         self._sync_hook_installed = False
         self._sync_hook_target: Optional[str] = None
         self._profile_config_error_logged = False
+        self._profile_state_error_logged = False
         self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
         self._last_question_card_id: Optional[int] = None
         self._debug_path: Optional[str] = None
@@ -266,6 +267,18 @@ class KanjiVocabRecalcManager:
             return None
         return os.path.join(folder, "kanjicards_config.json")
 
+    def _profile_state_path(self) -> Optional[str]:
+        pm = getattr(self.mw, "pm", None)
+        if pm is None:
+            return None
+        try:
+            folder = pm.profileFolder()
+        except Exception:
+            return None
+        if not folder:
+            return None
+        return os.path.join(folder, "kanjicards_state.json")
+
     def _debug(self, message: str, **extra: object) -> None:
         if not self._debug_enabled:
             return
@@ -287,40 +300,117 @@ class KanjiVocabRecalcManager:
         except Exception:
             pass
 
-    def _load_profile_config(self) -> Dict[str, Any]:
-        path = self._profile_config_path()
+    def _apply_profile_state_payload(self, payload: Dict[str, Any]) -> None:
+        def _coerce_int(value: Any) -> Optional[int]:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except Exception:
+                return None
+
+        self._last_vocab_sync_mod = _coerce_int(payload.get("last_vocab_sync_mod"))
+        self._last_vocab_sync_count = _coerce_int(payload.get("last_vocab_sync_count"))
+        config_hash = payload.get("last_config_hash")
+        if isinstance(config_hash, str) and config_hash:
+            self._last_synced_config_hash = config_hash
+        else:
+            self._last_synced_config_hash = None
+
+    def _extract_legacy_profile_state(self, data: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        legacy_state: Dict[str, Any] = {}
+        removed = False
+        for key in ("last_vocab_sync_mod", "last_vocab_sync_count", "last_config_hash"):
+            if key in data:
+                legacy_state[key] = data.pop(key)
+                removed = True
+        return legacy_state, removed
+
+    def _load_profile_state(self) -> None:
+        path = self._profile_state_path()
         if not path or not os.path.exists(path):
-            return {}
+            self._profile_state_error_logged = False
+            return
         try:
             with open(path, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
+                payload = json.load(handle)
         except Exception as err:  # noqa: BLE001
-            if not self._profile_config_error_logged:
-                _safe_print(f"[KanjiCards] Failed to load profile config: {err}")
-                self._profile_config_error_logged = True
-            return {}
-        self._profile_config_error_logged = False
-        if isinstance(data, dict):
-            marker_mod = data.get("last_vocab_sync_mod")
-            marker_count = data.get("last_vocab_sync_count")
+            if not self._profile_state_error_logged:
+                _safe_print(f"[KanjiCards] Failed to load profile state: {err}")
+                self._profile_state_error_logged = True
+            return
+        self._profile_state_error_logged = False
+        if isinstance(payload, dict):
+            self._apply_profile_state_payload(payload)
+
+    def _write_profile_state(self) -> None:
+        path = self._profile_state_path()
+        if not path:
+            return
+        state_payload: Dict[str, Any] = {}
+        if self._last_vocab_sync_mod is not None:
+            state_payload["last_vocab_sync_mod"] = int(self._last_vocab_sync_mod)
+        if self._last_vocab_sync_count is not None:
+            state_payload["last_vocab_sync_count"] = int(self._last_vocab_sync_count)
+        if self._last_synced_config_hash:
+            state_payload["last_config_hash"] = self._last_synced_config_hash
+        if not state_payload:
             try:
-                self._last_vocab_sync_mod = int(marker_mod)
-            except Exception:
-                self._last_vocab_sync_mod = None
-            try:
-                self._last_vocab_sync_count = int(marker_count)
-            except Exception:
-                self._last_vocab_sync_count = None
-            config_hash = data.get("last_config_hash")
-            if isinstance(config_hash, str) and config_hash:
-                self._last_synced_config_hash = config_hash
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except Exception as err:  # noqa: BLE001
+                if not self._profile_state_error_logged:
+                    _safe_print(f"[KanjiCards] Failed to remove profile state: {err}")
+                    self._profile_state_error_logged = True
             else:
-                self._last_synced_config_hash = None
-            return data
-        self._last_vocab_sync_mod = None
-        self._last_vocab_sync_count = None
-        self._last_synced_config_hash = None
-        return {}
+                self._profile_state_error_logged = False
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(state_payload, handle, indent=2, ensure_ascii=False)
+        except Exception as err:  # noqa: BLE001
+            if not self._profile_state_error_logged:
+                _safe_print(f"[KanjiCards] Failed to write profile state: {err}")
+                self._profile_state_error_logged = True
+        else:
+            self._profile_state_error_logged = False
+
+    def _load_profile_config(self) -> Dict[str, Any]:
+        path = self._profile_config_path()
+        config_data: Dict[str, Any] = {}
+        legacy_state: Dict[str, Any] = {}
+        legacy_removed = False
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    raw = json.load(handle)
+            except Exception as err:  # noqa: BLE001
+                if not self._profile_config_error_logged:
+                    _safe_print(f"[KanjiCards] Failed to load profile config: {err}")
+                    self._profile_config_error_logged = True
+                self._apply_profile_state_payload({})
+                self._load_profile_state()
+                return {}
+            self._profile_config_error_logged = False
+            if isinstance(raw, dict):
+                config_data = dict(raw)
+                legacy_state, legacy_removed = self._extract_legacy_profile_state(config_data)
+            else:
+                self._apply_profile_state_payload({})
+                self._load_profile_state()
+                return {}
+        else:
+            self._profile_config_error_logged = False
+        if legacy_state:
+            self._apply_profile_state_payload(legacy_state)
+        else:
+            self._apply_profile_state_payload({})
+        self._load_profile_state()
+        if legacy_removed:
+            self._write_profile_config(config_data)
+        return config_data
 
     def _load_profile_config_or_seed(self, global_cfg: Dict[str, Any]) -> Dict[str, Any]:
         path = self._profile_config_path()
@@ -336,25 +426,17 @@ class KanjiVocabRecalcManager:
         path = self._profile_config_path()
         if not path:
             return
+        write_succeeded = False
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             payload = dict(data)
-            if self._last_vocab_sync_mod is not None:
-                payload["last_vocab_sync_mod"] = int(self._last_vocab_sync_mod)
-            else:
-                payload.pop("last_vocab_sync_mod", None)
-            if self._last_vocab_sync_count is not None:
-                payload["last_vocab_sync_count"] = int(self._last_vocab_sync_count)
-            else:
-                payload.pop("last_vocab_sync_count", None)
-            if self._last_synced_config_hash:
-                payload["last_config_hash"] = self._last_synced_config_hash
-            else:
-                payload.pop("last_config_hash", None)
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, ensure_ascii=False)
+            write_succeeded = True
         except Exception as err:  # noqa: BLE001
             _safe_print(f"[KanjiCards] Failed to write profile config: {err}")
+        if write_succeeded:
+            self._write_profile_state()
 
     def _merge_config_sources(self, global_cfg: Dict[str, Any], profile_cfg: Dict[str, Any]) -> Dict[str, Any]:
         if not profile_cfg:

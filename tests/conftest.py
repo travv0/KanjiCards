@@ -362,6 +362,7 @@ def manager_with_profile(kanjicards_module, tmp_path):
     manager._debug_path = str(tmp_path / "debug.log")
     manager._debug_enabled = False
     manager._profile_config_error_logged = False
+    manager._profile_state_error_logged = False
     manager._dictionary_cache = None
     manager._existing_notes_cache = None
     manager._kanji_model_cache = None

@@ -21,6 +21,7 @@ def manager(kanjicards_module, tmp_path):
     manager._sync_hook_installed = False
     manager._sync_hook_target = None
     manager._profile_config_error_logged = False
+    manager._profile_state_error_logged = False
     manager._pre_answer_card_state = {}
     manager._last_question_card_id = None
     manager._debug_enabled = False
@@ -274,6 +275,56 @@ def test_write_profile_config_creates_directory(manager_with_profile, tmp_path):
     assert path.exists()
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert stored["value"] == 3
+    state_path = Path(manager_with_profile._profile_state_path())
+    assert not state_path.exists()
+
+
+def test_write_profile_config_separates_state(manager_with_profile):
+    config_path = Path(manager_with_profile._profile_config_path())
+    state_path = Path(manager_with_profile._profile_state_path())
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if state_path.exists():
+        state_path.unlink()
+    manager_with_profile._last_vocab_sync_mod = 111
+    manager_with_profile._last_vocab_sync_count = 7
+    manager_with_profile._last_synced_config_hash = "hash"
+    manager_with_profile._write_profile_config({"value": 9})
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "last_vocab_sync_mod" not in config_data
+    assert "last_vocab_sync_count" not in config_data
+    assert "last_config_hash" not in config_data
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state_data["last_vocab_sync_mod"] == 111
+    assert state_data["last_vocab_sync_count"] == 7
+    assert state_data["last_config_hash"] == "hash"
+
+
+def test_load_profile_config_migrates_legacy_state(manager_with_profile):
+    config_path = Path(manager_with_profile._profile_config_path())
+    state_path = Path(manager_with_profile._profile_state_path())
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_payload = {
+        "value": 5,
+        "last_vocab_sync_mod": 222,
+        "last_vocab_sync_count": "12",
+        "last_config_hash": "legacy",
+    }
+    config_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    if state_path.exists():
+        state_path.unlink()
+    data = manager_with_profile._load_profile_config()
+    assert data == {"value": 5}
+    assert manager_with_profile._last_vocab_sync_mod == 222
+    assert manager_with_profile._last_vocab_sync_count == 12
+    assert manager_with_profile._last_synced_config_hash == "legacy"
+    state_data = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state_data["last_vocab_sync_mod"] == 222
+    assert state_data["last_vocab_sync_count"] == 12
+    assert state_data["last_config_hash"] == "legacy"
+    rewritten_config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "last_vocab_sync_mod" not in rewritten_config
+    assert "last_vocab_sync_count" not in rewritten_config
+    assert "last_config_hash" not in rewritten_config
 
 
 def test_merge_config_sources_nested(manager_with_profile):

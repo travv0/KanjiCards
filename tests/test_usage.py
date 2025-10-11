@@ -22,6 +22,8 @@ class FakeCollection:
 def manager(kanjicards_module):
     manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
     manager.mw = types.SimpleNamespace()
+    manager._profile_config_error_logged = False
+    manager._profile_state_error_logged = False
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None
     manager._pending_vocab_sync_marker = None
