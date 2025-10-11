@@ -240,6 +240,7 @@ class KanjiVocabRecalcManager:
         self._recalc_action = None
         self._prioritysieve_recalc_wrapped = False
         self._prioritysieve_waiting_post_sync = False
+        self._prioritysieve_toolbar_followup = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -824,74 +825,6 @@ class KanjiVocabRecalcManager:
 
         self._call_later(_check, delay_ms)
 
-    def _install_prioritysieve_followup(
-        self,
-        ps_main: ModuleType,
-        on_complete: Callable[[], None],
-        *,
-        fallback_delay_ms: int = 500,
-        max_checks: int = 5,
-    ) -> Optional[Tuple[Callable[[], None], Callable[[], None]]]:
-        set_callback = getattr(ps_main, "set_followup_sync_callback", None)
-        if not callable(set_callback):
-            return None
-
-        previous_callback = getattr(ps_main, "_followup_sync_callback", None)
-        state: Dict[str, object] = {"finished": False, "remaining_checks": max(0, max_checks)}
-
-        def _finish() -> None:
-            if state.get("finished"):
-                return
-            state["finished"] = True
-            try:
-                set_callback(previous_callback)
-            except Exception:
-                pass
-            if callable(previous_callback):
-                try:
-                    previous_callback()
-                except Exception:
-                    pass
-            try:
-                on_complete()
-            except Exception:
-                pass
-
-        try:
-            set_callback(_finish)
-        except Exception:
-            return None
-
-        def _schedule_checks() -> None:
-            if state.get("finished"):
-                return
-            if fallback_delay_ms <= 0:
-                _finish()
-                return
-
-            def _check() -> None:
-                if state.get("finished"):
-                    return
-                recalc_in_progress = getattr(ps_main, "recalc_in_progress", None)
-                if callable(recalc_in_progress):
-                    try:
-                        if recalc_in_progress():
-                            self._call_later(_check, fallback_delay_ms)
-                            return
-                    except Exception:
-                        pass
-                else:
-                    remaining = int(state.get("remaining_checks", 0))
-                    if remaining > 0:
-                        state["remaining_checks"] = remaining - 1
-                        self._call_later(_check, fallback_delay_ms)
-                        return
-                _finish()
-
-            self._call_later(_check, fallback_delay_ms)
-
-        return _finish, _schedule_checks
-
     def _ensure_prioritysieve_completion_hooks(self, ps_main: ModuleType) -> None:
         self._wrap_prioritysieve_completion_hook(ps_main, "_on_success")
         self._wrap_prioritysieve_completion_hook(ps_main, "_on_failure")
@@ -961,10 +894,16 @@ class KanjiVocabRecalcManager:
         return bool(setting_value)
 
     def _handle_prioritysieve_recalc_completed(self) -> None:
-        if not getattr(self, "_prioritysieve_waiting_post_sync", False):
+        if getattr(self, "_prioritysieve_toolbar_followup", False):
+            self._prioritysieve_toolbar_followup = False
+            try:
+                self.run_recalc()
+            except Exception:
+                pass
             return
-        self._prioritysieve_waiting_post_sync = False
-        self.run_after_sync()
+        if getattr(self, "_prioritysieve_waiting_post_sync", False):
+            self._prioritysieve_waiting_post_sync = False
+            self.run_after_sync()
 
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
         ps_main = self._prioritysieve_recalc_main()
@@ -1003,30 +942,20 @@ class KanjiVocabRecalcManager:
     # ------------------------------------------------------------------
     def run_toolbar_recalc(self) -> None:
         ps_main = self._prioritysieve_recalc_main()
+        if ps_main:
+            self._maybe_wrap_prioritysieve_recalc(ps_main)
         priority_recalc = getattr(ps_main, "recalc", None) if ps_main else None
         if not callable(priority_recalc):
             self.run_recalc()
             return
 
-        followup = self._install_prioritysieve_followup(ps_main, self.run_recalc) if ps_main else None
-        finish: Optional[Callable[[], None]] = None
-        schedule_checks: Optional[Callable[[], None]] = None
-        if followup:
-            finish, schedule_checks = followup
-
+        self._prioritysieve_toolbar_followup = True
         try:
             priority_recalc()
         except Exception:
-            if finish:
-                finish()
-            else:
-                self.run_recalc()
-            return
-
-        if schedule_checks:
-            schedule_checks()
-        elif finish is None:
+            self._prioritysieve_toolbar_followup = False
             self.run_recalc()
+            return
 
     def run_recalc(self) -> None:
         self.mw.checkpoint("KanjiCards")

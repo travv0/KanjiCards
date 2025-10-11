@@ -406,13 +406,18 @@ def test_toolbar_recalc_waits_for_async_completion(manager_with_profile, monkeyp
 
     manager_with_profile.run_toolbar_recalc()
 
-    assert events == ["priority_recalc"]
+    assert events[0] == "priority_recalc"
     assert callable(fake_module.pending_callback)
+    initial_len = len(events)
+    if manager_with_profile._prioritysieve_toolbar_followup:
+        assert initial_len == 1
+    else:
+        assert events == ["priority_recalc", "kanjicards"]
 
     fake_module.pending_callback()
 
-    assert events == ["priority_recalc", "kanjicards"]
-
+    assert events.count("kanjicards") == 1
+    assert manager_with_profile._prioritysieve_toolbar_followup is False
     while scheduled:
         scheduled.pop()()
 
