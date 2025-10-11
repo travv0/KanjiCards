@@ -240,7 +240,6 @@ class KanjiVocabRecalcManager:
         self._recalc_action = None
         self._prioritysieve_recalc_wrapped = False
         self._prioritysieve_waiting_post_sync = False
-        self._prioritysieve_toolbar_followup = False
         self.addon_name = self.mw.addonManager.addonFromModule(__name__)
         if self.addon_name:
             self.addon_dir = os.path.join(self.mw.addonManager.addonsFolder(), self.addon_name)
@@ -894,29 +893,18 @@ class KanjiVocabRecalcManager:
         return bool(setting_value)
 
     def _handle_prioritysieve_recalc_completed(self) -> None:
-        if getattr(self, "_prioritysieve_toolbar_followup", False):
-            self._prioritysieve_toolbar_followup = False
-            try:
-                self.run_recalc()
-            except Exception:
-                pass
-            return
         if getattr(self, "_prioritysieve_waiting_post_sync", False):
             self._prioritysieve_waiting_post_sync = False
             self.run_after_sync()
 
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
-        ps_main = self._prioritysieve_recalc_main()
         for index in range(len(links) - 1, -1, -1):
             if f'id="{KANJICARDS_TOOLBAR_ID}"' in links[index]:
                 links.pop(index)
-        if ps_main:
-            self._maybe_wrap_prioritysieve_recalc(ps_main)
-            return
         link = toolbar.create_link(
             cmd=KANJICARDS_TOOLBAR_CMD,
-            label="Recalc",
-            func=self.run_toolbar_recalc,
+            label="KC Recalc",
+            func=self.run_recalc,
             tip="Recalculate Kanji cards",
             id=KANJICARDS_TOOLBAR_ID,
         )
@@ -926,48 +914,8 @@ class KanjiVocabRecalcManager:
         link_handlers = getattr(toolbar, "link_handlers", None)
         if not isinstance(link_handlers, dict):
             return
-        ps_main = self._prioritysieve_recalc_main()
-        if ps_main:
-            self._maybe_wrap_prioritysieve_recalc(ps_main)
-            if PRIORITYSIEVE_TOOLBAR_CMD in link_handlers:
-                ps_handler = link_handlers.get(PRIORITYSIEVE_TOOLBAR_CMD)
-                if callable(ps_handler) and not getattr(ps_handler, "_kanjicards_toolbar_wrapper", False):
-                    link_handlers[PRIORITYSIEVE_TOOLBAR_CMD] = self._wrap_prioritysieve_toolbar_handler(ps_handler)
-            link_handlers.pop(KANJICARDS_TOOLBAR_CMD, None)
-            return
-        self._maybe_wrap_prioritysieve_recalc()
         if KANJICARDS_TOOLBAR_CMD in link_handlers:
-            link_handlers[KANJICARDS_TOOLBAR_CMD] = self.run_toolbar_recalc
-
-    # ------------------------------------------------------------------
-    # Recalc routine
-    # ------------------------------------------------------------------
-    def run_toolbar_recalc(self) -> None:
-        ps_main = self._prioritysieve_recalc_main()
-        if ps_main:
-            self._maybe_wrap_prioritysieve_recalc(ps_main)
-        priority_recalc = getattr(ps_main, "recalc", None) if ps_main else None
-        if not callable(priority_recalc):
-            self.run_recalc()
-            return
-
-        self._prioritysieve_toolbar_followup = True
-        try:
-            priority_recalc()
-        except Exception:
-            self._prioritysieve_toolbar_followup = False
-            self.run_recalc()
-            return
-
-    def _wrap_prioritysieve_toolbar_handler(self, original: Callable[..., object]) -> Callable[..., object]:
-        manager = self
-
-        @wraps(original)
-        def wrapped(*args: object, **kwargs: object) -> object:
-            return manager.run_toolbar_recalc()
-
-        setattr(wrapped, "_kanjicards_toolbar_wrapper", True)
-        return wrapped
+            link_handlers[KANJICARDS_TOOLBAR_CMD] = self.run_recalc
 
     def run_recalc(self) -> None:
         self.mw.checkpoint("KanjiCards")
