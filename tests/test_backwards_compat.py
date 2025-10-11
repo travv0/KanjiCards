@@ -33,6 +33,20 @@ def test_add_note_falls_back_to_legacy(kanjicards_module):
     assert col.calls == ["note"]
 
 
+def test_unsuspend_cards_prefers_set_suspended(kanjicards_module):
+    class Coll:
+        def __init__(self):
+            self.calls = []
+
+        def set_suspended(self, ids, suspended):
+            self.calls.append((list(ids), suspended))
+
+    col = Coll()
+    count = kanjicards_module._unsuspend_cards(col, [1, "2"])
+    assert count == 2
+    assert col.calls == [([1, 2], False)]
+
+
 def test_unsuspend_cards_uses_scheduler(kanjicards_module):
     class Sched:
         def __init__(self):
@@ -43,23 +57,15 @@ def test_unsuspend_cards_uses_scheduler(kanjicards_module):
 
     sched = Sched()
     collection = types.SimpleNamespace(sched=sched)
-    kanjicards_module._unsuspend_cards(collection, [1, 2])
+    count = kanjicards_module._unsuspend_cards(collection, [1, 2])
     assert sched.calls == [[1, 2]]
+    assert count == 2
 
 
-def test_unsuspend_cards_updates_db(kanjicards_module, monkeypatch):
-    captured = {}
-
-    class DB:
-        def execute(self, sql, *params):
-            captured["sql"] = sql
-            captured["params"] = params
-
-    collection = types.SimpleNamespace(sched=None, db=DB(), usn=lambda: 0)
-
-    monkeypatch.setattr(kanjicards_module, "_db_execute", lambda col, sql, *params, context="": captured.update({"call": (sql, params)}))
-    kanjicards_module._unsuspend_cards(collection, [3])
-    assert captured["call"][0].startswith("UPDATE cards SET mod")
+def test_unsuspend_cards_handles_missing_api(kanjicards_module):
+    collection = types.SimpleNamespace()
+    count = kanjicards_module._unsuspend_cards(collection, [3])
+    assert count == 0
 
 
 def test_resuspend_note_cards_uses_scheduler(kanjicards_module, monkeypatch):
@@ -78,15 +84,29 @@ def test_resuspend_note_cards_uses_scheduler(kanjicards_module, monkeypatch):
     assert collection.sched.calls == [[1]]
 
 
-def test_resuspend_note_cards_updates_db(kanjicards_module, monkeypatch):
-    calls = {}
+def test_resuspend_note_cards_prefers_set_suspended(kanjicards_module, monkeypatch):
+    class Coll:
+        def __init__(self):
+            self.calls = []
+
+        def set_suspended(self, ids, suspended):
+            self.calls.append((list(ids), suspended))
+
+    monkeypatch.setattr(kanjicards_module, "_db_all", lambda *args, **kwargs: [(5, 0), (6, 1)])
+    collection = Coll()
+    collection.db = types.SimpleNamespace()
+    collection.usn = lambda: 0
+    count = kanjicards_module._resuspend_note_cards(collection, types.SimpleNamespace(id=5))
+    assert count == 2
+    assert collection.calls == [([5, 6], True)]
+
+
+def test_resuspend_note_cards_handles_missing_api(kanjicards_module, monkeypatch):
     monkeypatch.setattr(kanjicards_module, "_db_all", lambda *args, **kwargs: [(1, 0), (2, 1)])
-    monkeypatch.setattr(kanjicards_module, "_db_execute", lambda col, sql, *params, context="": calls.setdefault("sql", sql))
     collection = types.SimpleNamespace(sched=None, db=types.SimpleNamespace(), usn=lambda: 0)
     note = types.SimpleNamespace(id=5)
     count = kanjicards_module._resuspend_note_cards(collection, note)
-    assert count == 2
-    assert calls["sql"].startswith("UPDATE cards SET mod")
+    assert count == 0
 
 
 def test_db_all_and_execute_wrap_errors(kanjicards_module, monkeypatch):

@@ -2022,7 +2022,7 @@ class KanjiVocabRecalcManager:
         if tag in note.tags:
             return False, note
         _add_tag(note, tag)
-        note.flush()
+        _commit_note_changes(collection, note)
         return True, note
 
     def _apply_bucket_tag_to_note(
@@ -2057,7 +2057,7 @@ class KanjiVocabRecalcManager:
                 changed = True
 
         if changed:
-            note.flush()
+            _commit_note_changes(collection, note)
         return changed
 
     def _find_notes_with_bucket_tags(
@@ -2101,6 +2101,8 @@ class KanjiVocabRecalcManager:
         cfg: AddonConfig,
         has_vocab: bool,
         has_reviewed_vocab: bool,
+        *,
+        collection: Optional[Collection] = None,
     ) -> None:
         only_new_tag = cfg.only_new_vocab_tag.strip()
         no_vocab_tag = cfg.no_vocab_tag.strip()
@@ -2127,7 +2129,10 @@ class KanjiVocabRecalcManager:
                     existing_lower.add(tag.lower())
 
         if changed:
-            note.flush()
+            if collection is not None:
+                _commit_note_changes(collection, note)
+            else:
+                note.flush()
 
     def _remove_unused_tags(
         self,
@@ -2182,7 +2187,7 @@ class KanjiVocabRecalcManager:
             if created_tag_lower and created_tag_lower in tag_lookup:
                 resuspend_needed = True
             if resuspend_needed:
-                resuspended = _resuspend_note_cards(collection, note)
+                resuspended = _normalize_count(_resuspend_note_cards(collection, note))
                 if resuspended:
                     resuspended_total += resuspended
             self._update_kanji_status_tags(
@@ -2190,9 +2195,10 @@ class KanjiVocabRecalcManager:
                 cfg,
                 has_vocab=False,
                 has_reviewed_vocab=False,
+                collection=collection,
             )
             if changed:
-                note.flush()
+                _commit_note_changes(collection, note)
         return removed, resuspended_total
 
     def _reorder_new_kanji_cards(
@@ -2467,9 +2473,10 @@ class KanjiVocabRecalcManager:
                         cfg,
                         has_vocab=True,
                         has_reviewed_vocab=info.reviewed,
+                        collection=collection,
                     )
                 if note_changed:
-                    note.flush()
+                    _commit_note_changes(collection, note)
                 continue
 
             if dictionary_entry is None:
@@ -2497,6 +2504,7 @@ class KanjiVocabRecalcManager:
                         cfg,
                         has_vocab=True,
                         has_reviewed_vocab=info.reviewed,
+                        collection=collection,
                     )
 
         if prune_existing and cfg.existing_tag:
@@ -2801,7 +2809,7 @@ class KanjiVocabRecalcManager:
                     newly_suspended = 0
                     if unsuspended_cards:
                         note_obj_local = ensure_note()
-                        newly_suspended = _resuspend_note_cards(collection, note_obj_local)
+                        newly_suspended = _normalize_count(_resuspend_note_cards(collection, note_obj_local))
                         if newly_suspended > 0:
                             stats["vocab_suspended"] += newly_suspended
                             existing_lower = {value.lower() for value in note_obj_local.tags}
@@ -2826,8 +2834,11 @@ class KanjiVocabRecalcManager:
                                 chars="".join(sorted(chars)),
                                 count=len(suspended_cards),
                             )
-                            _unsuspend_cards(collection, suspended_cards)
-                            stats["vocab_unsuspended"] += len(suspended_cards)
+                            unsuspended_count = _effective_count(
+                                suspended_cards,
+                                _unsuspend_cards(collection, suspended_cards),
+                            )
+                            stats["vocab_unsuspended"] += unsuspended_count
                         if _remove_tag_case_insensitive(note_obj_local, tag):
                             changed = True
                             note_has_tag = False
@@ -2836,8 +2847,11 @@ class KanjiVocabRecalcManager:
                     note_obj_local = ensure_note()
                     suspended_cards = [card_id for card_id, queue, _ in cards if queue == -1]
                     if suspended_cards:
-                        _unsuspend_cards(collection, suspended_cards)
-                        stats["vocab_unsuspended"] += len(suspended_cards)
+                        unsuspended_count = _effective_count(
+                            suspended_cards,
+                            _unsuspend_cards(collection, suspended_cards),
+                        )
+                        stats["vocab_unsuspended"] += unsuspended_count
                     if _remove_tag_case_insensitive(note_obj_local, tag):
                         changed = True
                         note_has_tag = False
@@ -2859,7 +2873,7 @@ class KanjiVocabRecalcManager:
                         changed = True
 
             if note_obj is not None and changed:
-                note_obj.flush()
+                _commit_note_changes(collection, note_obj)
 
         return stats
 
@@ -3052,15 +3066,15 @@ class KanjiVocabRecalcManager:
         if not to_unsuspend:
             return 0
 
-        _unsuspend_cards(collection, to_unsuspend)
+        unsuspended = _effective_count(to_unsuspend, _unsuspend_cards(collection, to_unsuspend))
 
         changed = False
         if unsuspend_tag and unsuspend_tag not in note.tags:
             _add_tag(note, unsuspend_tag)
             changed = True
         if changed:
-            note.flush()
-        return len(to_unsuspend)
+            _commit_note_changes(collection, note)
+        return unsuspended
 
     def _resolve_deck_id(self, collection: Collection, model: NotetypeDict, cfg: AddonConfig) -> int:
         if cfg.kanji_deck_name:
@@ -3791,25 +3805,10 @@ def _add_note(collection: Collection, note: Note, deck_id: Optional[int] = None)
     return collection.addNote(note)
 
 
-def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> None:
+def _unsuspend_cards(collection: Collection, card_ids: Sequence[int]) -> int:
     if not card_ids:
-        return
-    sched = getattr(collection, "sched", None)
-    if sched is not None:
-        for attr in ("unsuspend_cards", "unsuspendCards"):
-            func = getattr(sched, attr, None)
-            if callable(func):
-                func(list(card_ids))
-                return
-
-    placeholders = ",".join("?" for _ in card_ids)
-    params: List[object] = [intTime(), collection.usn(), *card_ids]
-    _db_execute(
-        collection,
-        f"UPDATE cards SET mod = ?, usn = ?, queue = type WHERE id IN ({placeholders})",
-        *params,
-        context="unsuspend_cards",
-    )
+        return 0
+    return _try_set_suspended_state(collection, card_ids, suspended=False)
 
 
 def _resuspend_note_cards(collection: Collection, note: Note) -> int:
@@ -3822,24 +3821,7 @@ def _resuspend_note_cards(collection: Collection, note: Note) -> int:
     to_suspend = [card_id for card_id, queue in card_rows if queue != -1]
     if not to_suspend:
         return 0
-
-    sched = getattr(collection, "sched", None)
-    if sched is not None:
-        for attr in ("suspend_cards", "suspendCards"):
-            func = getattr(sched, attr, None)
-            if callable(func):
-                func(list(to_suspend))
-                return len(to_suspend)
-
-    placeholders = ",".join("?" for _ in to_suspend)
-    params: List[object] = [intTime(), collection.usn(), *to_suspend]
-    _db_execute(
-        collection,
-        f"UPDATE cards SET mod = ?, usn = ?, queue = -1 WHERE id IN ({placeholders})",
-        *params,
-        context="resuspend_note_cards/update",
-    )
-    return len(to_suspend)
+    return _try_set_suspended_state(collection, to_suspend, suspended=True)
 
 
 def _db_all(
@@ -3904,6 +3886,95 @@ def _get_note(collection: Collection, note_id: int) -> Note:
     if callable(handler):
         return handler(note_id)
     return collection.getNote(note_id)
+
+
+def _commit_note_changes(collection: Collection, note: Note) -> None:
+    updater = getattr(collection, "update_note", None)
+    if callable(updater):
+        updater(note)
+        return
+    flusher = getattr(note, "flush", None)
+    if callable(flusher):
+        flusher()
+        return
+    note.flush()
+
+
+def _normalize_count(value: object) -> int:
+    if isinstance(value, int):
+        return value
+    try:
+        return int(value)  # type: ignore[call-arg]
+    except Exception:
+        return 0
+
+
+def _effective_count(card_ids: Sequence[int], result: object) -> int:
+    if not card_ids:
+        return 0
+    normalized = _normalize_count(result)
+    if normalized > 0:
+        return normalized
+    return len(card_ids)
+
+
+def _try_set_suspended_state(
+    collection: Collection,
+    card_ids: Sequence[int],
+    suspended: bool,
+) -> int:
+    normalized_ids: List[int] = []
+    for card_id in card_ids:
+        try:
+            normalized_ids.append(int(card_id))
+        except Exception:
+            continue
+    if not normalized_ids:
+        return 0
+
+    setter = getattr(collection, "set_suspended", None)
+    if callable(setter):
+        try:
+            setter(list(normalized_ids), suspended)
+            return len(normalized_ids)
+        except Exception:
+            pass
+
+    sched = getattr(collection, "sched", None)
+    if sched is not None:
+        method_names = ("suspend_cards", "suspendCards") if suspended else ("unsuspend_cards", "unsuspendCards")
+        for name in method_names:
+            func = getattr(sched, name, None)
+            if callable(func):
+                try:
+                    func(list(normalized_ids))
+                    return len(normalized_ids)
+                except Exception:
+                    continue
+
+    db = getattr(collection, "db", None)
+    if db is not None and hasattr(db, "execute"):
+        placeholders = ",".join("?" for _ in normalized_ids)
+        if not placeholders:
+            return 0
+        try:
+            usn_value = collection.usn() if callable(getattr(collection, "usn", None)) else getattr(collection, "usn", 0)
+        except Exception:
+            usn_value = 0
+        try:
+            mod_value = intTime()
+        except Exception:
+            mod_value = int(time.time())
+        params: List[object] = [mod_value, usn_value, *normalized_ids]
+        if suspended:
+            sql = f"UPDATE cards SET mod = ?, usn = ?, queue = -1 WHERE id IN ({placeholders})"
+            _db_execute(collection, sql, *params, context="set_suspended/fallback")
+        else:
+            sql = f"UPDATE cards SET mod = ?, usn = ?, queue = type WHERE id IN ({placeholders})"
+            _db_execute(collection, sql, *params, context="clear_suspended/fallback")
+        return len(normalized_ids)
+
+    return 0
 
 
 def _add_tag(note: Note, tag: str) -> None:
