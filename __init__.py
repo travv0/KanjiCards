@@ -227,6 +227,7 @@ class KanjiVocabRecalcManager:
         self._missing_deck_logged = False
         self._sync_hook_installed = False
         self._sync_hook_target: Optional[str] = None
+        self._active_recalc_undo: Optional[int] = None
         self._profile_config_error_logged = False
         self._profile_state_error_logged = False
         self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
@@ -613,7 +614,7 @@ class KanjiVocabRecalcManager:
     # ------------------------------------------------------------------
     def _ensure_menu_actions(self) -> None:
         menu = self.mw.form.menuTools
-        recalc_action = menu.addAction("Recalculate Kanji Cards from Vocab")
+        recalc_action = menu.addAction("KanjiCards Recalc")
         recalc_action.triggered.connect(self.run_recalc)
         self._recalc_action = recalc_action
 
@@ -928,7 +929,8 @@ class KanjiVocabRecalcManager:
             link_handlers[KANJICARDS_TOOLBAR_CMD] = self.run_recalc
 
     def run_recalc(self) -> None:
-        self.mw.checkpoint("KanjiCards")
+        collection = getattr(self.mw, "col", None)
+        undo_target = self._start_recalc_undo_entry(collection)
         progress_obj = getattr(self.mw, "progress", None)
         self.mw.progress.start(label="Preparing KanjiCards…", immediate=True)
         progress_tracker: Optional[Dict[str, object]] = None
@@ -948,14 +950,111 @@ class KanjiVocabRecalcManager:
             self._pending_vocab_sync_marker = None
             self._pending_config_hash = None
             self.mw.progress.finish()
+            self._finalize_recalc_undo(collection, undo_target)
             show_critical(f"KanjiCards recalc failed:\n{err}")
             return None
         else:
             self.mw.progress.finish()
             self._commit_vocab_sync_marker(cfg)
             self._notify_summary(stats)
+            self._finalize_recalc_undo(collection, undo_target)
             self.mw.reset()
             return stats
+
+    def _start_recalc_undo_entry(self, collection: Optional[Collection]) -> Optional[int]:
+        self._active_recalc_undo = None
+        if collection is not None:
+            creator = getattr(collection, "add_custom_undo_entry", None)
+            if callable(creator):
+                try:
+                    entry = creator("KanjiCards Recalc")
+                except Exception as err:  # noqa: BLE001
+                    self._debug("recalc/undo_entry_create_failed", error=str(err))
+                else:
+                    if isinstance(entry, int):
+                        self._active_recalc_undo = entry
+                        return entry
+                    try:
+                        result = int(entry)  # type: ignore[arg-type]
+                    except Exception:
+                        self._debug(
+                            "recalc/undo_entry_invalid",
+                            entry=entry,
+                        )
+                    else:
+                        self._active_recalc_undo = result
+                        return result
+        checkpoint = getattr(self.mw, "checkpoint", None)
+        if callable(checkpoint):
+            try:
+                checkpoint("KanjiCards")
+            except Exception as err:  # noqa: BLE001
+                self._debug("recalc/checkpoint_failed", error=str(err))
+        return None
+
+    def _finalize_recalc_undo(self, collection: Optional[Collection], undo_target: Optional[int]) -> None:
+        if undo_target is None or collection is None:
+            self._active_recalc_undo = None
+            return
+        merger = getattr(collection, "merge_undo_entries", None)
+        if not callable(merger):
+            self._active_recalc_undo = None
+            return
+        attempts = 0
+        while attempts < 50:
+            last_step = self._get_last_undo_step(collection)
+            if last_step is None or last_step == undo_target:
+                break
+            try:
+                merger(undo_target)
+            except Exception as err:  # noqa: BLE001
+                self._debug(
+                    "recalc/undo_entry_merge_failed",
+                    target=undo_target,
+                    error=str(err),
+                )
+                break
+            attempts += 1
+        self._active_recalc_undo = None
+
+    def _merge_recalc_undo_step(self, collection: Optional[Collection]) -> None:
+        target = self._active_recalc_undo
+        if target is None or collection is None:
+            return
+        merger = getattr(collection, "merge_undo_entries", None)
+        if not callable(merger):
+            return
+        try:
+            merger(target)
+        except Exception as err:  # noqa: BLE001
+            self._debug(
+                "recalc/undo_entry_step_failed",
+                target=target,
+                error=str(err),
+            )
+
+    def _get_last_undo_step(self, collection: Collection) -> Optional[int]:
+        getters = ("undo_status", "undoStatus")
+        for name in getters:
+            getter = getattr(collection, name, None)
+            if not callable(getter):
+                continue
+            try:
+                status = getter()
+            except Exception as err:  # noqa: BLE001
+                self._debug("recalc/undo_status_failed", error=str(err))
+                continue
+            for attr in ("last_step", "lastStep"):
+                value = getattr(status, attr, None)
+                if value is None:
+                    continue
+                if isinstance(value, int):
+                    return value
+                try:
+                    return int(value)  # type: ignore[arg-type]
+                except Exception:
+                    continue
+        return None
 
     def _progress_step(self, tracker: Optional[Dict[str, object]], label: str) -> None:
         if not tracker:
@@ -2891,6 +2990,7 @@ class KanjiVocabRecalcManager:
                         newly_suspended = _normalize_count(_resuspend_note_cards(collection, note_obj_local))
                         if newly_suspended > 0:
                             stats["vocab_suspended"] += newly_suspended
+                            self._merge_recalc_undo_step(collection)
                             existing_lower = {value.lower() for value in note_obj_local.tags}
                             if tag_lower not in existing_lower:
                                 _add_tag(note_obj_local, tag)
@@ -2918,6 +3018,7 @@ class KanjiVocabRecalcManager:
                                 _unsuspend_cards(collection, suspended_cards),
                             )
                             stats["vocab_unsuspended"] += unsuspended_count
+                            self._merge_recalc_undo_step(collection)
                         if _remove_tag_case_insensitive(note_obj_local, tag):
                             changed = True
                             note_has_tag = False
@@ -2931,6 +3032,7 @@ class KanjiVocabRecalcManager:
                             _unsuspend_cards(collection, suspended_cards),
                         )
                         stats["vocab_unsuspended"] += unsuspended_count
+                        self._merge_recalc_undo_step(collection)
                     if _remove_tag_case_insensitive(note_obj_local, tag):
                         changed = True
                         note_has_tag = False
@@ -2953,6 +3055,7 @@ class KanjiVocabRecalcManager:
 
             if note_obj is not None and changed:
                 _commit_note_changes(collection, note_obj)
+                self._merge_recalc_undo_step(collection)
                 stats["notes_updated"] += 1
 
         return stats

@@ -92,6 +92,7 @@ def real_env(tmp_path_factory):
     manager._last_vocab_sync_count = None
     manager._pending_vocab_sync_marker = None
     manager._suppress_next_auto_sync = False
+    manager._active_recalc_undo = None
 
     aqt.mw = manager.mw
 

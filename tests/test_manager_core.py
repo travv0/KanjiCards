@@ -105,6 +105,35 @@ class FakeTaskman:
         callback()
 
 
+class FakeUndoCollection:
+    def __init__(self) -> None:
+        self.entries: list[dict[str, object]] = []
+        self.merge_calls: list[int] = []
+        self._next_id = 1
+
+    def add_custom_undo_entry(self, name: str) -> int:
+        entry_id = self._next_id
+        self._next_id += 1
+        self.entries.append({"id": entry_id, "name": name})
+        return entry_id
+
+    def add_step(self, name: str) -> int:
+        entry_id = self._next_id
+        self._next_id += 1
+        self.entries.append({"id": entry_id, "name": name})
+        return entry_id
+
+    def merge_undo_entries(self, target: int) -> None:
+        self.merge_calls.append(target)
+        while self.entries and self.entries[-1]["id"] != target:
+            self.entries.pop()
+
+    def undo_status(self):
+        if not self.entries:
+            return types.SimpleNamespace(last_step=None)
+        return types.SimpleNamespace(last_step=self.entries[-1]["id"])
+
+
 class FakeMainWindow:
     def __init__(self, base_dir: Path) -> None:
         progress = FakeProgress()
@@ -115,7 +144,7 @@ class FakeMainWindow:
         self.addonManager = FakeAddonManager(str(base_dir / "addons"))
         self._checkpoints = []
         self._reset_calls = 0
-        self.col = types.SimpleNamespace()
+        self.col = FakeUndoCollection()
 
     def checkpoint(self, name: str) -> None:
         self._checkpoints.append(name)
@@ -144,7 +173,7 @@ def manager_with_mw(kanjicards_module, tmp_path, monkeypatch):
 def test_manager_init_wires_menu_and_hooks(manager_with_mw, kanjicards_module):
     manager, mw, hooks = manager_with_mw
     labels = [action.label for action in mw.form.menuTools.actions]
-    assert "Recalculate Kanji Cards from Vocab" in labels
+    assert "KanjiCards Recalc" in labels
     assert "KanjiCards Settings" in labels
     assert manager._on_reviewer_did_show_question in hooks.reviewer_did_show_question.callbacks
     assert manager._on_reviewer_did_answer_card in hooks.reviewer_did_answer_card.callbacks
@@ -349,7 +378,14 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
     manager_with_profile.addon_dir = str(tmp_path)
     stats_called = {}
     monkeypatch.setattr(manager_with_profile, "_notify_summary", lambda stats: stats_called.setdefault("stats", stats))
-    manager_with_profile._recalc_internal = lambda **kwargs: {"created": 1}  # type: ignore[assignment]
+    def fake_recalc(**kwargs):
+        mw.col.add_step("note update")
+        manager_with_profile._merge_recalc_undo_step(mw.col)
+        mw.col.add_step("card reorder")
+        manager_with_profile._merge_recalc_undo_step(mw.col)
+        return {"created": 1}
+
+    manager_with_profile._recalc_internal = fake_recalc  # type: ignore[assignment]
     cfg = manager_with_profile._config_from_raw(
         {
             "kanji_note_type": {"name": "Kanji", "fields": {}},
@@ -363,12 +399,22 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
     assert stats_called["stats"]["created"] == 1
     assert mw.progress.finished is True
     assert mw._reset_calls == 1
+    assert [entry["name"] for entry in mw.col.entries] == ["KanjiCards Recalc"]
+    assert mw.col.merge_calls == [1, 1]
+    assert mw._checkpoints == []
 
-    manager_with_profile._recalc_internal = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[assignment]
+    def failing_recalc(**kwargs):
+        mw.col.add_step("partial update")
+        manager_with_profile._merge_recalc_undo_step(mw.col)
+        raise RuntimeError("boom")
+
+    manager_with_profile._recalc_internal = failing_recalc  # type: ignore[assignment]
     called = {}
     monkeypatch.setattr(kanjicards_module, "show_critical", lambda message: called.setdefault("message", message))
     assert manager_with_profile.run_recalc() is None
     assert "boom" in called["message"]
+    assert [entry["name"] for entry in mw.col.entries] == ["KanjiCards Recalc", "KanjiCards Recalc"]
+    assert mw.col.merge_calls == [1, 1, 4]
 
 
 def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicards_module, monkeypatch, tmp_path):
