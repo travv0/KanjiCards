@@ -185,6 +185,7 @@ class AddonConfig:
     known_kanji_interval: int
     auto_suspend_vocab: bool
     auto_suspend_tag: str
+    only_suspend_new_vocab: bool
     resuspend_reviewed_low_interval: bool
     low_interval_vocab_tag: str
     store_scheduling_info: bool
@@ -540,6 +541,7 @@ class KanjiVocabRecalcManager:
             known_kanji_interval=interval_value,
             auto_suspend_vocab=bool(raw.get("auto_suspend_vocab", False)),
             auto_suspend_tag=raw.get("auto_suspend_tag", "kanjicards_new"),
+            only_suspend_new_vocab=bool(raw.get("only_suspend_new_vocab", False)),
             resuspend_reviewed_low_interval=bool(raw.get("resuspend_reviewed_low_interval", False)),
             low_interval_vocab_tag=raw.get("low_interval_vocab_tag", ""),
             store_scheduling_info=bool(raw.get("store_scheduling_info", False)),
@@ -574,6 +576,7 @@ class KanjiVocabRecalcManager:
             "known_kanji_interval": int(cfg.known_kanji_interval),
             "auto_suspend_vocab": bool(cfg.auto_suspend_vocab),
             "auto_suspend_tag": cfg.auto_suspend_tag,
+            "only_suspend_new_vocab": bool(cfg.only_suspend_new_vocab),
             "resuspend_reviewed_low_interval": bool(cfg.resuspend_reviewed_low_interval),
             "low_interval_vocab_tag": cfg.low_interval_vocab_tag,
             "store_scheduling_info": bool(cfg.store_scheduling_info),
@@ -2820,34 +2823,42 @@ class KanjiVocabRecalcManager:
                 for _, _, card_type in cards
             )
             requires_suspend = False
-            for char in chars:
-                status = kanji_status.get(char)
-                if status is None:
-                    requires_suspend = True
-                    break
-                if note_has_reviewed_card:
-                    if cfg.resuspend_reviewed_low_interval:
+            skip_auto_suspend = bool(cfg.only_suspend_new_vocab and note_has_reviewed_card)
+            if skip_auto_suspend:
+                self._debug(
+                    "realtime/skip_suspend_reviewed",
+                    note_id=note_id,
+                    chars="".join(sorted(chars)),
+                )
+            else:
+                for char in chars:
+                    status = kanji_status.get(char)
+                    if status is None:
+                        requires_suspend = True
+                        break
+                    if note_has_reviewed_card:
+                        if cfg.resuspend_reviewed_low_interval:
+                            if not status.has_review_card:
+                                requires_suspend = True
+                                break
+                            if threshold > 0 and status.current_interval < threshold:
+                                requires_suspend = True
+                                break
+                        else:
+                            has_history = status.has_history
+                            if not has_history:
+                                requires_suspend = True
+                                break
+                            if threshold > 0 and status.historical_interval < threshold:
+                                requires_suspend = True
+                                break
+                    else:
                         if not status.has_review_card:
                             requires_suspend = True
                             break
                         if threshold > 0 and status.current_interval < threshold:
                             requires_suspend = True
                             break
-                    else:
-                        has_history = status.has_history
-                        if not has_history:
-                            requires_suspend = True
-                            break
-                        if threshold > 0 and status.historical_interval < threshold:
-                            requires_suspend = True
-                            break
-                else:
-                    if not status.has_review_card:
-                        requires_suspend = True
-                        break
-                    if threshold > 0 and status.current_interval < threshold:
-                        requires_suspend = True
-                        break
             needs_low_interval_tag = False
             if low_interval_tag and threshold > 0:
                 for char in chars:
@@ -3302,6 +3313,10 @@ class KanjiVocabRecalcSettingsDialog(QDialog):  # pragma: no cover
         self.auto_suspend_tag_edit = QLineEdit(self.config.auto_suspend_tag)
         self.auto_suspend_tag_edit.setEnabled(self.config.auto_suspend_vocab)
         self.auto_suspend_check.toggled.connect(self.auto_suspend_tag_edit.setEnabled)
+        self.only_suspend_new_check = QCheckBox("Only suspend new vocab cards")
+        self.only_suspend_new_check.setChecked(self.config.only_suspend_new_vocab)
+        self.only_suspend_new_check.setEnabled(self.config.auto_suspend_vocab)
+        self.auto_suspend_check.toggled.connect(self.only_suspend_new_check.setEnabled)
         self.resuspend_reviewed_check = QCheckBox("Resuspend reviewed vocab when current interval drops below threshold")
         self.resuspend_reviewed_check.setChecked(self.config.resuspend_reviewed_low_interval)
         self.low_interval_vocab_tag_edit = QLineEdit(self.config.low_interval_vocab_tag)
@@ -3333,6 +3348,7 @@ class KanjiVocabRecalcSettingsDialog(QDialog):  # pragma: no cover
         form.addRow("", self.auto_sync_check)
         form.addRow("", self.ignore_suspended_check)
         form.addRow("", self.auto_suspend_check)
+        form.addRow("", self.only_suspend_new_check)
         form.addRow("Suspension tag", self.auto_suspend_tag_edit)
         form.addRow("", self.resuspend_reviewed_check)
         form.addRow("Below-threshold vocab tag", self.low_interval_vocab_tag_edit)
@@ -3612,6 +3628,7 @@ class KanjiVocabRecalcSettingsDialog(QDialog):  # pragma: no cover
             return False
         self.config.auto_suspend_vocab = auto_suspend_enabled
         self.config.auto_suspend_tag = auto_suspend_tag
+        self.config.only_suspend_new_vocab = self.only_suspend_new_check.isChecked()
         self.config.resuspend_reviewed_low_interval = self.resuspend_reviewed_check.isChecked()
         self.config.reorder_mode = self.reorder_combo.currentData() or "vocab"
         self.config.bucket_tags = {

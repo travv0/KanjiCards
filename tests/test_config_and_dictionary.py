@@ -84,6 +84,7 @@ def test_config_roundtrip(manager, kanjicards_module):
         "ignore_suspended_vocab": True,
         "auto_suspend_vocab": True,
         "auto_suspend_tag": "auto_suspend",
+        "only_suspend_new_vocab": True,
         "resuspend_reviewed_low_interval": True,
         "low_interval_vocab_tag": "needs_interval",
         "store_scheduling_info": True,
@@ -97,6 +98,7 @@ def test_config_roundtrip(manager, kanjicards_module):
     assert serialized["kanji_note_type"]["fields"]["kanji"] == "Character"
     assert serialized["kanji_note_type"]["fields"].get("scheduling_info", "") == ""
     assert serialized["bucket_tags"]["reviewed_vocab"] == "rev"
+    assert serialized["only_suspend_new_vocab"] is True
     assert serialized["resuspend_reviewed_low_interval"] is True
     assert serialized["low_interval_vocab_tag"] == "needs_interval"
     assert serialized["store_scheduling_info"] is True

@@ -189,6 +189,7 @@ def make_config(kanjicards_module, **overrides):
         "known_kanji_interval": 21,
         "auto_suspend_vocab": False,
         "auto_suspend_tag": "",
+        "only_suspend_new_vocab": False,
         "resuspend_reviewed_low_interval": False,
         "low_interval_vocab_tag": "",
         "store_scheduling_info": False,
@@ -690,6 +691,72 @@ def test_update_vocab_suspension_resuspends_reviewed_when_option_enabled(manager
 
     assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
     assert "needssuspend" in {tag.lower() for tag in note.tags}
+    assert note.flush_count == 1
+
+
+def test_update_vocab_suspension_skips_reviewed_when_only_new_enabled(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+        only_suspend_new_vocab=True,
+    )
+    note = SimpleNote(305, tags=["NeedsSuspend"])
+    collection = types.SimpleNamespace()
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {305: ({"火"}, {"NeedsSuspend"})},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(
+                has_review_card=True,
+                current_interval=1,
+                historical_interval=1,
+            )
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {305: [(703, -1, 2)]},
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+    unsuspended: List[int] = []
+
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda _collection, card_ids: unsuspended.extend(card_ids),
+    )
+
+    def fail_resuspend(*_args, **_kwargs):
+        raise AssertionError("should not resuspend reviewed cards when only new suspension is enabled")
+
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        fail_resuspend,
+    )
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1, "notes_updated": 1}
+    assert unsuspended == [703]
+    assert "needssuspend" not in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
 
 
