@@ -204,6 +204,103 @@ def test_process_reviewed_card_triggers_for_review_queue(manager, kanjicards_mod
     assert manager._pre_answer_card_state == {}
 
 
+def test_process_reviewed_card_merges_vocab_changes_into_undo(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(kanjicards_module)
+    manager.load_config = lambda: cfg
+
+    kanji_model = {"id": 10, "name": "Kanji", "flds": [{"name": "Character"}]}
+    monkeypatch.setattr(
+        manager,
+        "_get_kanji_model_context",
+        lambda *args, **kwargs: (kanji_model, {"kanji": 0}, 0),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_vocab_model_map",
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_existing_kanji_notes",
+        lambda *args, **kwargs: {"火": 1},
+    )
+    expected_stats = {"vocab_suspended": 0, "vocab_unsuspended": 1, "notes_updated": 0}
+    monkeypatch.setattr(
+        manager,
+        "_update_vocab_suspension",
+        lambda *args, **kwargs: expected_stats,
+    )
+
+    class UndoableCollection:
+        def __init__(self):
+            self.merged = []
+
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=777)
+
+        def merge_undo_entries(self, target):
+            self.merged.append(target)
+
+    note = FakeNote(mid=10, fields=["火"], note_id=5)
+    card = FakeCard(888, note)
+    manager._pre_answer_card_state[888] = {"type": 0, "queue": 0, "note_id": 5}
+    manager._last_question_card_id = 888
+    collection = UndoableCollection()
+    manager.mw.col = collection
+
+    manager._process_reviewed_card(card)
+
+    assert collection.merged == [777]
+
+
+def test_process_reviewed_card_skips_merge_when_no_vocab_change(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(kanjicards_module)
+    manager.load_config = lambda: cfg
+
+    kanji_model = {"id": 10, "name": "Kanji", "flds": [{"name": "Character"}]}
+    monkeypatch.setattr(
+        manager,
+        "_get_kanji_model_context",
+        lambda *args, **kwargs: (kanji_model, {"kanji": 0}, 0),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_vocab_model_map",
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_existing_kanji_notes",
+        lambda *args, **kwargs: {"火": 1},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_update_vocab_suspension",
+        lambda *args, **kwargs: {"vocab_suspended": 0, "vocab_unsuspended": 0, "notes_updated": 0},
+    )
+
+    class UndoableCollection:
+        def __init__(self):
+            self.merged = []
+
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=888)
+
+        def merge_undo_entries(self, target):
+            self.merged.append(target)
+
+    note = FakeNote(mid=10, fields=["火"], note_id=5)
+    card = FakeCard(889, note)
+    manager._pre_answer_card_state[889] = {"type": 0, "queue": 0, "note_id": 5}
+    manager._last_question_card_id = 889
+    collection = UndoableCollection()
+    manager.mw.col = collection
+
+    manager._process_reviewed_card(card)
+
+    assert collection.merged == []
+
+
 def test_process_reviewed_card_fetches_note_on_failure(manager, kanjicards_module, monkeypatch):
     cfg = make_config(kanjicards_module)
     manager.load_config = lambda: cfg

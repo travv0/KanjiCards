@@ -1394,15 +1394,83 @@ class KanjiVocabRecalcManager:
             self._debug("realtime/skip", reason="no_existing_notes")
             return
 
-        self._update_vocab_suspension(
+        undo_merge_target = self._capture_undo_merge_target(collection)
+        suspension_stats = self._update_vocab_suspension(
             collection,
             cfg,
             vocab_field_map,
             existing_notes,
             target_chars=kanji_chars,
         )
-
+        self._merge_realtime_undo(collection, undo_merge_target, suspension_stats)
         self._realtime_error_logged = False
+
+    def _capture_undo_merge_target(self, collection: Collection) -> Optional[int]:
+        getters = ("undo_status", "undoStatus")
+        for name in getters:
+            getter = getattr(collection, name, None)
+            if not callable(getter):
+                continue
+            try:
+                status = getter()
+            except Exception:
+                continue
+            candidates = []
+            if isinstance(status, dict):
+                candidates.extend(status.get(key) for key in ("last_step", "lastStep"))
+            else:
+                candidates.extend(getattr(status, key, None) for key in ("last_step", "lastStep"))
+            for target in candidates:
+                if isinstance(target, int):
+                    return target
+                try:
+                    normalized = int(target)  # type: ignore[arg-type]
+                except Exception:
+                    continue
+                else:
+                    return normalized
+        return None
+
+    def _merge_realtime_undo(
+        self,
+        collection: Collection,
+        undo_target: Optional[int],
+        stats: object,
+    ) -> None:
+        if undo_target is None:
+            return
+        if not self._stats_indicate_vocab_change(stats):
+            return
+        mergers = ("merge_undo_entries", "mergeUndoEntries")
+        for name in mergers:
+            merger = getattr(collection, name, None)
+            if not callable(merger):
+                continue
+            try:
+                merger(undo_target)
+            except Exception as err:  # noqa: BLE001
+                self._debug(
+                    "realtime/merge_undo_failed",
+                    target=undo_target,
+                    error=str(err),
+                )
+            break
+
+    @staticmethod
+    def _stats_indicate_vocab_change(stats: object) -> bool:
+        if not isinstance(stats, dict):
+            return False
+        keys = ("vocab_unsuspended", "vocab_suspended", "notes_updated")
+        for key in keys:
+            value = stats.get(key)
+            if not value:
+                continue
+            try:
+                if int(value):  # type: ignore[arg-type]
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
         if self._prioritysieve_post_sync_active():
@@ -2717,7 +2785,7 @@ class KanjiVocabRecalcManager:
         existing_notes: Dict[str, int],
         target_chars: Optional[Set[str]] = None,
     ) -> Dict[str, int]:
-        stats = {"vocab_suspended": 0, "vocab_unsuspended": 0}
+        stats = {"vocab_suspended": 0, "vocab_unsuspended": 0, "notes_updated": 0}
         tag = cfg.auto_suspend_tag.strip()
         if not tag:
             self._debug("realtime/skip", reason="no_suspend_tag")
@@ -2874,6 +2942,7 @@ class KanjiVocabRecalcManager:
 
             if note_obj is not None and changed:
                 _commit_note_changes(collection, note_obj)
+                stats["notes_updated"] += 1
 
         return stats
 

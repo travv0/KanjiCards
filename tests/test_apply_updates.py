@@ -444,7 +444,7 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
         existing_notes={"火": 1},
     )
 
-    assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0}
+    assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
     assert "needssuspend" in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
 
@@ -510,7 +510,7 @@ def test_update_vocab_suspension_skips_tag_when_already_suspended(manager, kanji
         existing_notes={"火": 1},
     )
 
-    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0}
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0, "notes_updated": 0}
     assert not called_resuspend
     assert note.tags == []
     assert note.flush_count == 0
@@ -570,7 +570,7 @@ def test_update_vocab_suspension_unsuspends_and_clears_tag(manager, kanjicards_m
         existing_notes={"火": 1},
     )
 
-    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1}
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1, "notes_updated": 1}
     assert unsuspended == [601]
     assert "needssuspend" not in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
@@ -627,7 +627,7 @@ def test_update_vocab_suspension_uses_historical_for_reviewed_vocab(manager, kan
         existing_notes={"火": 1},
     )
 
-    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1}
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1, "notes_updated": 1}
     assert unsuspended == [701]
     assert "needssuspend" not in {tag.lower() for tag in note.tags}
     assert "lowinterval" in {tag.lower() for tag in note.tags}
@@ -688,7 +688,7 @@ def test_update_vocab_suspension_resuspends_reviewed_when_option_enabled(manager
         existing_notes={"火": 1},
     )
 
-    assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0}
+    assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
     assert "needssuspend" in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
 
@@ -735,7 +735,7 @@ def test_update_vocab_suspension_tags_new_note_with_low_interval(manager, kanjic
         {1: [0]},
         existing_notes={"火": 1},
     )
-    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0}
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0, "notes_updated": 1}
     assert "lowinterval" in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
 
