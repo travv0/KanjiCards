@@ -58,6 +58,7 @@ def make_config(kanjicards_module):
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
         store_scheduling_info=False,
+        debug_logging=False,
     )
 
 

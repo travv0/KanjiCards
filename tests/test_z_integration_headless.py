@@ -154,6 +154,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
         store_scheduling_info=False,
+        debug_logging=False,
     )
 
     kanji_model_resolved, field_indexes, kanji_field_index = manager._get_kanji_model_context(col, cfg)
@@ -183,6 +184,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
         store_scheduling_info=False,
+        debug_logging=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, bad_cfg)
@@ -208,6 +210,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
         store_scheduling_info=False,
+        debug_logging=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, missing_cfg)
@@ -234,6 +237,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
         store_scheduling_info=False,
+        debug_logging=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, bad_field_cfg)
@@ -260,6 +264,7 @@ def test_headless_apply_updates_creates_real_notes(real_env):
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
         store_scheduling_info=False,
+        debug_logging=False,
     )
     with pytest.raises(RuntimeError):
         manager._get_kanji_model_context(col, missing_field_cfg)

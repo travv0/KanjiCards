@@ -123,6 +123,7 @@ def make_config(kanjicards_module, **overrides):
         "resuspend_reviewed_low_interval": False,
         "low_interval_vocab_tag": "",
         "store_scheduling_info": False,
+        "debug_logging": False,
     }
     base.update(overrides)
     return kanjicards_module.AddonConfig(**base)

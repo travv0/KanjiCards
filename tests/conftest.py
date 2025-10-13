@@ -275,11 +275,19 @@ def _install_stubs() -> None:
     aqt_pkg.gui_hooks = gui_hooks
     aqt_pkg.mw = None
 
+    operations_module = types.ModuleType("aqt.operations")
+
+    def _on_op_finished(*args, **kwargs):
+        return None
+
+    operations_module.on_op_finished = _on_op_finished
+
     qt_mod = _make_qt_module()
 
     sys.modules["aqt"] = aqt_pkg
     sys.modules["aqt.gui_hooks"] = gui_hooks  # type: ignore[assignment]
     sys.modules["aqt.utils"] = utils_module
+    sys.modules["aqt.operations"] = operations_module
     sys.modules["aqt.qt"] = qt_mod
 
     class _AddonFinder(importlib.abc.MetaPathFinder):

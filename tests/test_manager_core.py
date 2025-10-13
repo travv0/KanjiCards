@@ -417,6 +417,18 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
     assert mw.col.merge_calls == [1, 1, 4]
 
 
+def test_start_recalc_undo_entry_accepts_proto(manager_with_profile, monkeypatch):
+    mw = types.SimpleNamespace(col=FakeUndoCollection())
+    manager_with_profile.mw = mw
+    proto = types.SimpleNamespace(id=99)
+    monkeypatch.setattr(mw.col, "add_custom_undo_entry", lambda name: proto)
+
+    undo_id = manager_with_profile._start_recalc_undo_entry(mw.col)
+
+    assert undo_id == proto.id
+    assert manager_with_profile._active_recalc_undo == proto.id
+
+
 def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicards_module, monkeypatch, tmp_path):
     mw = FakeMainWindow(tmp_path)
     manager_with_profile.mw = mw

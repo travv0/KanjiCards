@@ -239,6 +239,7 @@ def build_environment(kanjicards_module, reorder_mode):
         resuspend_reviewed_low_interval=False,
         low_interval_vocab_tag="",
         store_scheduling_info=False,
+        debug_logging=False,
     )
 
     initial_tags = {note.id: set(note.tags) for note in notes}
