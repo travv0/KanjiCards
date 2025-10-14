@@ -422,17 +422,18 @@ def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
 
     class FailingUndoCollection:
         def __init__(self) -> None:
-            self.entries: list[dict[str, object]] = [
-                {"id": 1, "name": "KanjiCards Recalc"},
-                {"id": 2, "name": "Suspend"},
+            self.entries = [
+                {"id": 1, "name": "KanjiCards Recalc", "has_changes": True},
+                {"id": 2, "name": "Suspend", "has_changes": True},
             ]
             self._next_id = 3
             self._fail_once = True
+            self.queue = -1
 
         def add_custom_undo_entry(self, name: str) -> int:
             entry_id = self._next_id
             self._next_id += 1
-            self.entries.append({"id": entry_id, "name": name})
+            self.entries.append({"id": entry_id, "name": name, "has_changes": False})
             return entry_id
 
         def undo_status(self):
@@ -444,19 +445,26 @@ def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
             if self._fail_once:
                 self._fail_once = False
                 raise RuntimeError("target undo op not found")
-            self.entries = [entry for entry in self.entries if entry["id"] == target]
-            return types.SimpleNamespace(ListFields=lambda: [])
+            while self.entries and self.entries[-1]["id"] != target:
+                self.entries.pop()
+            if self.entries:
+                self.entries[-1]["has_changes"] = True
+            return types.SimpleNamespace(ListFields=lambda: [1])
 
         def undo(self):
-            if self.entries:
-                self.entries.pop()
-            return types.SimpleNamespace(ListFields=lambda: [])
+            if not self.entries:
+                raise RuntimeError("empty undo stack")
+            entry = self.entries.pop()
+            if entry["name"].lower().startswith("suspend"):
+                self.queue = 0
+            return types.SimpleNamespace(ListFields=lambda: [1])
 
-        def set_suspended(self, ids, suspended):  # noqa: D401 - test helper
+        def set_suspended(self, ids, suspended: bool):
             entry_id = self._next_id
             self._next_id += 1
             label = "Suspend" if suspended else "Unsuspend"
-            self.entries.append({"id": entry_id, "name": label})
+            self.entries.append({"id": entry_id, "name": label, "has_changes": bool(suspended)})
+            self.queue = -1 if suspended else 0
 
     collection = FailingUndoCollection()
     manager._active_recalc_undo = 1
@@ -464,7 +472,8 @@ def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
 
     manager._merge_recalc_undo_step(collection)  # type: ignore[arg-type]
 
-    assert [entry["name"] for entry in collection.entries] == ["KanjiCards Recalc"]
+    assert collection.entries[-1]["name"] == "KanjiCards Recalc"
+    assert not any(entry["name"].lower().startswith("suspend") for entry in collection.entries)
 
 
 def test_merge_recalc_undo_step_replay_keeps_single_undo(kanjicards_module):
