@@ -1,3 +1,14 @@
+
+class DummySuspendCollection:
+    def __init__(self):
+        self.calls = []
+
+    def set_suspended(self, ids, suspended):
+        self.calls.append((list(ids), bool(suspended)))
+
+    def sched(self):
+        raise AssertionError('sched should not be consulted when set_suspended exists')
+
 import types
 from typing import List
 
@@ -405,7 +416,7 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
         auto_suspend_tag="NeedsSuspend",
     )
     note = SimpleNote(101)
-    collection = types.SimpleNamespace()
+    collection = DummySuspendCollection()
 
     monkeypatch.setattr(
         manager,
@@ -459,7 +470,7 @@ def test_update_vocab_suspension_skips_tag_when_already_suspended(manager, kanji
         auto_suspend_tag="NeedsSuspend",
     )
     note = SimpleNote(303)
-    collection = types.SimpleNamespace()
+    collection = DummySuspendCollection()
 
     monkeypatch.setattr(
         manager,
@@ -526,7 +537,7 @@ def test_update_vocab_suspension_unsuspends_and_clears_tag(manager, kanjicards_m
         auto_suspend_tag="NeedsSuspend",
     )
     note = SimpleNote(202, tags=["NeedsSuspend"])
-    collection = types.SimpleNamespace()
+    collection = DummySuspendCollection()
 
     monkeypatch.setattr(
         manager,
@@ -587,7 +598,7 @@ def test_update_vocab_suspension_uses_historical_for_reviewed_vocab(manager, kan
         low_interval_vocab_tag="LowInterval",
     )
     note = SimpleNote(303, tags=["NeedsSuspend"])
-    collection = types.SimpleNamespace()
+    collection = DummySuspendCollection()
 
     monkeypatch.setattr(
         manager,
@@ -645,7 +656,7 @@ def test_update_vocab_suspension_resuspends_reviewed_when_option_enabled(manager
         resuspend_reviewed_low_interval=True,
     )
     note = SimpleNote(304)
-    collection = types.SimpleNamespace()
+    collection = DummySuspendCollection()
 
     monkeypatch.setattr(
         manager,

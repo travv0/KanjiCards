@@ -417,6 +417,45 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
     assert mw.col.merge_calls == [1, 1, 4]
 
 
+def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
+    manager = manager_with_profile
+
+    class FailingUndoCollection:
+        def __init__(self) -> None:
+            self.entries: list[dict[str, object]] = [
+                {"id": 1, "name": "KanjiCards Recalc"},
+                {"id": 2, "name": "Suspend"},
+            ]
+            self._next_id = 3
+            self._fail_once = True
+
+        def add_custom_undo_entry(self, name: str) -> int:
+            entry_id = self._next_id
+            self._next_id += 1
+            self.entries.append({"id": entry_id, "name": name})
+            return entry_id
+
+        def undo_status(self):
+            if not self.entries:
+                return types.SimpleNamespace(last_step=None)
+            return types.SimpleNamespace(last_step=self.entries[-1]["id"])
+
+        def merge_undo_entries(self, target: int):
+            if self._fail_once:
+                self._fail_once = False
+                raise RuntimeError("target undo op not found")
+            while self.entries and self.entries[-1]["id"] != target:
+                self.entries.pop()
+            return types.SimpleNamespace(ListFields=lambda: [])
+
+    collection = FailingUndoCollection()
+    manager._active_recalc_undo = 1
+
+    manager._merge_recalc_undo_step(collection)  # type: ignore[arg-type]
+
+    assert [entry["name"] for entry in collection.entries] == ["KanjiCards Recalc"]
+
+
 def test_start_recalc_undo_entry_accepts_proto(manager_with_profile, monkeypatch):
     mw = types.SimpleNamespace(col=FakeUndoCollection())
     manager_with_profile.mw = mw
