@@ -467,6 +467,69 @@ def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
     assert [entry["name"] for entry in collection.entries] == ["KanjiCards Recalc"]
 
 
+def test_merge_recalc_undo_step_replay_keeps_single_undo(kanjicards_module):
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
+    manager._debug_enabled = False
+    manager._pending_suspend_retry = None
+    manager._pending_undo_retry = False
+
+    class ReplayCollection:
+        def __init__(self) -> None:
+            self.entries = [{"id": 1, "name": "KanjiCards Recalc"}]
+            self.next_id = 2
+            self.fail_once = True
+            self.card_queue = 0
+
+        def add_custom_undo_entry(self, name: str) -> int:
+            entry_id = self.next_id
+            self.next_id += 1
+            self.entries.append({"id": entry_id, "name": name})
+            return entry_id
+
+        def undo_status(self):
+            if not self.entries:
+                return types.SimpleNamespace(last_step=None, undo="")
+            last = self.entries[-1]
+            return types.SimpleNamespace(last_step=last["id"], undo=last["name"])
+
+        def merge_undo_entries(self, target: int):
+            if self.fail_once:
+                self.fail_once = False
+                raise RuntimeError("target undo op not found")
+            while self.entries and self.entries[-1]["id"] != target:
+                self.entries.pop()
+            return types.SimpleNamespace(ListFields=lambda: [1])
+
+        def undo(self):
+            if not self.entries:
+                raise RuntimeError("empty undo stack")
+            entry = self.entries.pop()
+            if entry["name"].lower().startswith("suspend"):
+                self.card_queue = 0
+            return types.SimpleNamespace(ListFields=lambda: [1], undoed_op=entry["name"])
+
+        def set_suspended(self, ids, suspended: bool):
+            entry_id = self.next_id
+            self.next_id += 1
+            label = "Suspend" if suspended else "Unsuspend"
+            self.entries.append({"id": entry_id, "name": label})
+            self.card_queue = -1 if suspended else 0
+
+    collection = ReplayCollection()
+    manager._active_recalc_undo = 1
+    collection.set_suspended([702], True)
+    manager._pending_suspend_retry = [702]
+
+    manager._merge_recalc_undo_step(collection)
+
+    assert collection.undo_status().undo == "KanjiCards Recalc"
+    assert collection.card_queue == -1
+
+    collection.undo()
+
+    assert collection.card_queue == 0
+
+
 def test_start_recalc_undo_entry_accepts_proto(manager_with_profile, monkeypatch):
     mw = types.SimpleNamespace(col=FakeUndoCollection())
     manager_with_profile.mw = mw
