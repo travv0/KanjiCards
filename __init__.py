@@ -1054,6 +1054,7 @@ class KanjiVocabRecalcManager:
         label: str,
         initiator: object,
         log_prefix: str,
+        force_merge: bool = False,
     ) -> Optional[int]:
         if collection is None:
             return None
@@ -1071,8 +1072,9 @@ class KanjiVocabRecalcManager:
                 current = self._create_custom_undo_entry(collection, label=label)
                 attempts += 1
                 continue
-            if last_step == current:
+            if last_step == current and not force_merge:
                 return current
+            force_merge = False
             merger = getattr(collection, "merge_undo_entries", None)
             if not callable(merger):
                 return current
@@ -1164,6 +1166,7 @@ class KanjiVocabRecalcManager:
                             label="KanjiCards Recalc",
                             initiator=self,
                             log_prefix="step/retry",
+                            force_merge=True,
                         )
         if target is None:
             return

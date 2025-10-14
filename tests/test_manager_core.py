@@ -475,15 +475,16 @@ def test_merge_recalc_undo_step_replay_keeps_single_undo(kanjicards_module):
 
     class ReplayCollection:
         def __init__(self) -> None:
-            self.entries = [{"id": 1, "name": "KanjiCards Recalc"}]
+            self.entries = [{"id": 1, "name": "KanjiCards Recalc", "has_changes": False}]
             self.next_id = 2
             self.fail_once = True
             self.card_queue = 0
+            self.pending_changes = False
 
         def add_custom_undo_entry(self, name: str) -> int:
             entry_id = self.next_id
             self.next_id += 1
-            self.entries.append({"id": entry_id, "name": name})
+            self.entries.append({"id": entry_id, "name": name, "has_changes": False})
             return entry_id
 
         def undo_status(self):
@@ -498,22 +499,24 @@ def test_merge_recalc_undo_step_replay_keeps_single_undo(kanjicards_module):
                 raise RuntimeError("target undo op not found")
             while self.entries and self.entries[-1]["id"] != target:
                 self.entries.pop()
+            if self.entries:
+                self.entries[-1]["has_changes"] = self.entries[-1]["has_changes"] or self.pending_changes
+            self.pending_changes = False
             return types.SimpleNamespace(ListFields=lambda: [1])
 
         def undo(self):
             if not self.entries:
                 raise RuntimeError("empty undo stack")
             entry = self.entries.pop()
-            if entry["name"].lower().startswith("suspend"):
+            if entry.get("has_changes"):
                 self.card_queue = 0
             return types.SimpleNamespace(ListFields=lambda: [1], undoed_op=entry["name"])
 
         def set_suspended(self, ids, suspended: bool):
-            entry_id = self.next_id
-            self.next_id += 1
-            label = "Suspend" if suspended else "Unsuspend"
-            self.entries.append({"id": entry_id, "name": label})
+            self.pending_changes = bool(suspended)
             self.card_queue = -1 if suspended else 0
+            if suspended and self.entries:
+                self.entries[-1]["has_changes"] = True
 
     collection = ReplayCollection()
     manager._active_recalc_undo = 1
