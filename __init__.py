@@ -221,6 +221,13 @@ class AddonConfig:
 
 
 @dataclass
+class PendingSuspendRetry:
+    card_ids: List[int]
+    tag: str
+    note_ids: List[int]
+
+
+@dataclass
 class KanjiUsageInfo:
     reviewed: bool = False
     first_review_order: Optional[int] = None
@@ -259,7 +266,7 @@ class KanjiVocabRecalcManager:
         self._active_recalc_undo: Optional[int] = None
         self._profile_config_error_logged = False
         self._profile_state_error_logged = False
-        self._pending_suspend_retry: Optional[List[int]] = None
+        self._pending_suspend_retry: Optional[PendingSuspendRetry] = None
         self._pending_undo_retry = False
         self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
         self._last_question_card_id: Optional[int] = None
@@ -1186,8 +1193,8 @@ class KanjiVocabRecalcManager:
         if collection is None:
             return
         base_target = target
-        previous_retry_ids = self._pending_suspend_retry
         self._log_undo_state(collection, "merge_step_begin", target=target)
+        retry_payload = self._pending_suspend_retry
         self._pending_undo_retry = False
         target = self._coalesce_undo_stack(
             collection,
@@ -1198,8 +1205,8 @@ class KanjiVocabRecalcManager:
         )
         retry_required = self._pending_undo_retry
         self._pending_undo_retry = False
-        if retry_required and previous_retry_ids:
-            retry_ids = list(dict.fromkeys(previous_retry_ids))
+        if retry_required and retry_payload and retry_payload.card_ids:
+            retry_ids = list(dict.fromkeys(retry_payload.card_ids))
             undone = False
             while True:
                 last_step = self._get_last_undo_step(collection)
@@ -1215,23 +1222,30 @@ class KanjiVocabRecalcManager:
                 else:
                     _notify_op_result(undo_result, initiator=self)
                     undone = True
-            if undone:
+            if undone and retry_ids:
                 retry_target = self._create_custom_undo_entry(collection, label="KanjiCards Recalc")
                 if retry_target is not None:
+                    previous_active = self._active_recalc_undo
                     self._active_recalc_undo = retry_target
-                    replay_count = _normalize_count(
-                        _try_set_suspended_state(collection, retry_ids, suspended=True)
-                    )
-                    if replay_count:
-                        target = self._coalesce_undo_stack(
-                            collection,
-                            retry_target,
-                            label="KanjiCards Recalc",
-                            initiator=self,
-                            log_prefix="step/retry",
-                            force_merge=True,
+                    try:
+                        replay_count = _normalize_count(
+                            _try_set_suspended_state(collection, retry_ids, suspended=True)
                         )
-                        base_target = target
+                        if replay_count:
+                            self._restore_suspend_tags_for_retry(collection, retry_payload)
+                            target = self._coalesce_undo_stack(
+                                collection,
+                                retry_target,
+                                label="KanjiCards Recalc",
+                                initiator=self,
+                                log_prefix="step/retry",
+                                force_merge=True,
+                            )
+                            base_target = target
+                    finally:
+                        self._active_recalc_undo = previous_active if previous_active is not None else retry_target
+            elif retry_required:
+                self._log_undo_state(collection, "merge_step_retry_skipped", target=target)
         elif retry_required:
             self._log_undo_state(collection, "merge_step_retry_skipped", target=target)
         if target is None:
@@ -1252,6 +1266,34 @@ class KanjiVocabRecalcManager:
             )
         self._active_recalc_undo = target
         self._log_undo_state(collection, "merge_step_complete", target=target)
+
+    def _restore_suspend_tags_for_retry(
+        self,
+        collection: Collection,
+        payload: PendingSuspendRetry,
+    ) -> int:
+        tag = payload.tag.strip()
+        if not tag:
+            return 0
+        tag_lower = tag.lower()
+        updated = 0
+        for note_id in payload.note_ids:
+            try:
+                note = _get_note(collection, note_id)
+            except Exception as err:  # noqa: BLE001
+                self._debug("recalc/retry_note_load_failed", note_id=note_id, error=str(err))
+                continue
+            existing_lower = {value.lower() for value in getattr(note, "tags", []) if isinstance(value, str)}
+            if tag_lower in existing_lower:
+                continue
+            _add_tag(note, tag)
+            try:
+                _commit_note_changes(collection, note)
+            except Exception as err:  # noqa: BLE001
+                self._debug("recalc/retry_note_commit_failed", note_id=note_id, error=str(err))
+                continue
+            updated += 1
+        return updated
 
     def _coerce_undo_step_value(self, value: object) -> Optional[int]:
         if value is None:
@@ -3167,6 +3209,7 @@ class KanjiVocabRecalcManager:
         card_map = self._load_card_status_for_notes(collection, notes_info.keys())
 
         pending_suspend_cards: List[int] = []
+        pending_suspend_notes: Set[int] = set()
         suspend_seen: Set[int] = set()
 
         for note_id, (chars, tag_set) in notes_info.items():
@@ -3256,6 +3299,7 @@ class KanjiVocabRecalcManager:
                             _add_tag(note_obj_local, tag)
                             changed = True
                             note_has_tag = True
+                        pending_suspend_notes.add(note_id)
                     else:
                         self._debug(
                             "realtime/already_suspended",
@@ -3326,7 +3370,13 @@ class KanjiVocabRecalcManager:
             if suspended_count:
                 stats["vocab_suspended"] += suspended_count
                 previous_retry = self._pending_suspend_retry
-                self._pending_suspend_retry = unique_ids
+                retry_tag = tag if isinstance(tag, str) else ""
+                retry_notes = sorted(pending_suspend_notes)
+                self._pending_suspend_retry = PendingSuspendRetry(
+                    card_ids=unique_ids,
+                    tag=retry_tag,
+                    note_ids=retry_notes,
+                )
                 try:
                     self._merge_recalc_undo_step(collection)
                 finally:

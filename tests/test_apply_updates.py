@@ -465,6 +465,90 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
     assert note.flush_count == 1
 
 
+def test_update_vocab_suspension_retains_tag_when_merge_fails(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+    )
+    note = SimpleNote(202)
+
+    class FailingUndoCollection:
+        def __init__(self) -> None:
+            self.undo_calls = 0
+            self.suspend_calls = []
+            self.last_step = 2
+
+        def set_suspended(self, ids, suspended):
+            self.suspend_calls.append((list(ids), bool(suspended)))
+
+        def merge_undo_entries(self, target):
+            raise Exception("target undo op not found")
+
+        def add_custom_undo_entry(self, label):
+            self.last_step += 1
+            return self.last_step
+
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=self.last_step)
+
+        def undo(self):
+            self.undo_calls += 1
+            self.last_step = 1
+            if note.tags:
+                note.tags.pop()
+            return types.SimpleNamespace(ListFields=lambda: ["dummy"])
+
+    collection = FailingUndoCollection()
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {202: ({"火"}, set())},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(has_review_card=True, current_interval=0, historical_interval=0)
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {202: [(802, 0, 0)]},
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda *args, **kwargs: None,
+    )
+
+    manager._active_recalc_undo = 1
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
+    assert "needssuspend" in {tag.lower() for tag in note.tags}
+    assert note.flush_count == 2
+    assert collection.undo_calls == 1
+
+
 def test_update_vocab_suspension_skips_tag_when_already_suspended(manager, kanjicards_module, monkeypatch):
     cfg = make_config(
         kanjicards_module,

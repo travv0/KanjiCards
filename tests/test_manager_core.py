@@ -417,7 +417,7 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
     assert mw.col.merge_calls == [1, 1, 4]
 
 
-def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
+def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile, kanjicards_module):
     manager = manager_with_profile
 
     class FailingUndoCollection:
@@ -468,7 +468,11 @@ def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
 
     collection = FailingUndoCollection()
     manager._active_recalc_undo = 1
-    manager._pending_suspend_retry = [702]
+    manager._pending_suspend_retry = kanjicards_module.PendingSuspendRetry(
+        card_ids=[702],
+        tag="NeedsSuspend",
+        note_ids=[],
+    )
 
     manager._merge_recalc_undo_step(collection)  # type: ignore[arg-type]
 
@@ -530,7 +534,11 @@ def test_merge_recalc_undo_step_replay_keeps_single_undo(kanjicards_module):
     collection = ReplayCollection()
     manager._active_recalc_undo = 1
     collection.set_suspended([702], True)
-    manager._pending_suspend_retry = [702]
+    manager._pending_suspend_retry = kanjicards_module.PendingSuspendRetry(
+        card_ids=[702],
+        tag="NeedsSuspend",
+        note_ids=[],
+    )
 
     manager._merge_recalc_undo_step(collection)
 
