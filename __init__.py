@@ -259,6 +259,8 @@ class KanjiVocabRecalcManager:
         self._active_recalc_undo: Optional[int] = None
         self._profile_config_error_logged = False
         self._profile_state_error_logged = False
+        self._pending_suspend_retry: Optional[List[int]] = None
+        self._pending_undo_retry = False
         self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
         self._last_question_card_id: Optional[int] = None
         self._debug_path: Optional[str] = None
@@ -1084,6 +1086,7 @@ class KanjiVocabRecalcManager:
                 )
                 message = str(err).lower()
                 if "target undo op not found" in message:
+                    self._pending_undo_retry = True
                     current = self._create_custom_undo_entry(collection, label=label)
                     attempts += 1
                     continue
@@ -1129,7 +1132,9 @@ class KanjiVocabRecalcManager:
         target = self._active_recalc_undo
         if collection is None:
             return
+        previous_retry_ids = self._pending_suspend_retry
         self._log_undo_state(collection, "merge_step_begin", target=target)
+        self._pending_undo_retry = False
         target = self._coalesce_undo_stack(
             collection,
             target,
@@ -1137,6 +1142,29 @@ class KanjiVocabRecalcManager:
             initiator=self,
             log_prefix="step",
         )
+        if self._pending_undo_retry and previous_retry_ids:
+            self._pending_undo_retry = False
+            retry_ids = list(dict.fromkeys(previous_retry_ids))
+            try:
+                undo_result = collection.undo()
+            except Exception as err:  # noqa: BLE001
+                self._debug("recalc/undo_retry_failed", error=str(err))
+            else:
+                _notify_op_result(undo_result, initiator=self)
+                retry_target = self._create_custom_undo_entry(collection, label="KanjiCards Recalc")
+                if retry_target is not None:
+                    self._active_recalc_undo = retry_target
+                    replay_count = _normalize_count(
+                        _try_set_suspended_state(collection, retry_ids, suspended=True)
+                    )
+                    if replay_count:
+                        target = self._coalesce_undo_stack(
+                            collection,
+                            retry_target,
+                            label="KanjiCards Recalc",
+                            initiator=self,
+                            log_prefix="step/retry",
+                        )
         if target is None:
             return
         self._active_recalc_undo = target
@@ -3208,12 +3236,18 @@ class KanjiVocabRecalcManager:
                 stats["notes_updated"] += 1
 
         if pending_suspend_cards:
+            unique_ids = list(dict.fromkeys(pending_suspend_cards))
             suspended_count = _normalize_count(
-                _try_set_suspended_state(collection, pending_suspend_cards, suspended=True)
+                _try_set_suspended_state(collection, unique_ids, suspended=True)
             )
             if suspended_count:
                 stats["vocab_suspended"] += suspended_count
-                self._merge_recalc_undo_step(collection)
+                previous_retry = self._pending_suspend_retry
+                self._pending_suspend_retry = unique_ids
+                try:
+                    self._merge_recalc_undo_step(collection)
+                finally:
+                    self._pending_suspend_retry = previous_retry
 
         return stats
 

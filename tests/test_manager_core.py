@@ -444,12 +444,23 @@ def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile):
             if self._fail_once:
                 self._fail_once = False
                 raise RuntimeError("target undo op not found")
-            while self.entries and self.entries[-1]["id"] != target:
+            self.entries = [entry for entry in self.entries if entry["id"] == target]
+            return types.SimpleNamespace(ListFields=lambda: [])
+
+        def undo(self):
+            if self.entries:
                 self.entries.pop()
             return types.SimpleNamespace(ListFields=lambda: [])
 
+        def set_suspended(self, ids, suspended):  # noqa: D401 - test helper
+            entry_id = self._next_id
+            self._next_id += 1
+            label = "Suspend" if suspended else "Unsuspend"
+            self.entries.append({"id": entry_id, "name": label})
+
     collection = FailingUndoCollection()
     manager._active_recalc_undo = 1
+    manager._pending_suspend_retry = [702]
 
     manager._merge_recalc_undo_step(collection)  # type: ignore[arg-type]
 

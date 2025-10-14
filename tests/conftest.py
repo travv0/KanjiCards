@@ -387,4 +387,6 @@ def manager_with_profile(kanjicards_module, tmp_path):
     manager._suppress_next_auto_sync = False
     manager._prioritysieve_waiting_post_sync = False
     manager._active_recalc_undo = None
+    manager._pending_suspend_retry = None
+    manager._pending_undo_retry = False
     return manager
