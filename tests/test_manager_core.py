@@ -765,6 +765,63 @@ def test_merge_recalc_undo_step_returns_when_target_none(manager_with_profile, k
     assert manager._active_recalc_undo == 31
 
 
+def test_merge_recalc_undo_step_preserves_prior_history_on_retry(manager_with_profile, kanjicards_module, monkeypatch):
+    manager = manager_with_profile
+    manager._debug_enabled = False
+
+    class ClearingCollection:
+        def __init__(self) -> None:
+            self.entries = [
+                {"id": 1, "name": "Manual Edit"},
+                {"id": 2, "name": "Template Change"},
+            ]
+            self._next_id = 3
+
+        def add_custom_undo_entry(self, name: str) -> int:
+            entry_id = self._next_id
+            self._next_id += 1
+            self.entries.append({"id": entry_id, "name": name})
+            return entry_id
+
+        def undo_status(self):
+            if not self.entries:
+                return types.SimpleNamespace(last_step=None, undo="")
+            last = self.entries[-1]
+            return types.SimpleNamespace(last_step=last["id"], undo=last["name"])
+
+        def undo(self):
+            if not self.entries:
+                raise RuntimeError("empty undo stack")
+            removed = self.entries.pop()
+            return types.SimpleNamespace(ListFields=lambda: [1], undoed_op=removed["name"])
+
+        def set_suspended(self, ids, suspended: bool):
+            return len(ids)
+
+    collection = ClearingCollection()
+    start_target = manager._start_recalc_undo_entry(collection)
+    assert start_target is not None
+    collection.add_custom_undo_entry("Suspend")
+    manager._pending_suspend_retry = kanjicards_module.PendingSuspendRetry(
+        card_ids=[702],
+        tag="NeedsSuspend",
+        note_ids=[],
+    )
+
+    def fake_coalesce(_collection, target, *, log_prefix, **kwargs):
+        manager._pending_undo_retry = True
+        return None
+
+    monkeypatch.setattr(manager, "_coalesce_undo_stack", fake_coalesce)
+    monkeypatch.setattr(kanjicards_module, "_try_set_suspended_state", lambda *_args, **_kwargs: 0)
+
+    manager._merge_recalc_undo_step(collection)
+
+    names = [entry["name"] for entry in collection.entries]
+    assert "Manual Edit" in names
+    assert "Template Change" in names
+
+
 def test_restore_suspend_tags_for_retry_skips_blank_tag(manager_with_profile, kanjicards_module):
     manager = manager_with_profile
     result = manager._restore_suspend_tags_for_retry(

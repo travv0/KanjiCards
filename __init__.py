@@ -293,6 +293,7 @@ class KanjiVocabRecalcManager:
         self._install_sync_hook()
         self.mw.addonManager.setConfigAction(__name__, self.show_settings)
         self._suppress_next_auto_sync = False
+        self._recalc_undo_floor: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Configuration helpers
@@ -1067,6 +1068,7 @@ class KanjiVocabRecalcManager:
             return None
         current = target
         attempts = 0
+        floor = getattr(self, "_recalc_undo_floor", None)
         while attempts < 50:
             last_step = self._get_last_undo_step(collection)
             if last_step is None:
@@ -1079,6 +1081,11 @@ class KanjiVocabRecalcManager:
                 current = self._create_custom_undo_entry(collection, label=label)
                 attempts += 1
                 continue
+            if floor is not None:
+                if current is not None and current <= floor:
+                    return current
+                if last_step <= floor:
+                    return current
             if last_step == current and not force_merge:
                 return current
             force_merge = False
@@ -1153,6 +1160,10 @@ class KanjiVocabRecalcManager:
 
     def _start_recalc_undo_entry(self, collection: Optional[Collection]) -> Optional[int]:
         self._active_recalc_undo = None
+        if collection is None:
+            self._recalc_undo_floor = None
+        else:
+            self._recalc_undo_floor = self._get_last_undo_step(collection)
         target = self._create_custom_undo_entry(collection, label="KanjiCards Recalc")
         if target is not None:
             self._log_undo_state(collection, "start_recalc_entry_created", target=target)
@@ -1170,6 +1181,7 @@ class KanjiVocabRecalcManager:
     def _finalize_recalc_undo(self, collection: Optional[Collection], undo_target: Optional[int]) -> None:
         if undo_target is None or collection is None:
             self._active_recalc_undo = None
+            self._recalc_undo_floor = None
             return
         self._active_recalc_undo = undo_target
         self._log_undo_state(collection, "finalize_begin", target=undo_target)
@@ -1187,6 +1199,7 @@ class KanjiVocabRecalcManager:
         )
         self._active_recalc_undo = None
         self._log_undo_state(collection, "finalize_complete", target=resolved_target)
+        self._recalc_undo_floor = None
 
     def _merge_recalc_undo_step(self, collection: Optional[Collection]) -> None:
         target = self._active_recalc_undo
@@ -1213,6 +1226,9 @@ class KanjiVocabRecalcManager:
                 if last_step is None:
                     break
                 if target is not None and last_step <= target:
+                    break
+                floor = getattr(self, "_recalc_undo_floor", None)
+                if floor is not None and last_step <= floor:
                     break
                 try:
                     undo_result = collection.undo()
