@@ -1,6 +1,7 @@
 import sys
 import types
 from pathlib import Path
+from typing import Optional
 
 import pytest
 
@@ -548,6 +549,326 @@ def test_merge_recalc_undo_step_replay_keeps_single_undo(kanjicards_module):
     collection.undo()
 
     assert collection.card_queue == 0
+
+
+def test_merge_recalc_undo_step_restores_tag_on_retry(manager_with_profile, kanjicards_module, monkeypatch):
+    manager = manager_with_profile
+
+    class TagNote:
+        def __init__(self, note_id: int) -> None:
+            self.id = note_id
+            self.tags: list[str] = []
+            self.flush_count = 0
+
+        def add_tag(self, tag: str) -> None:
+            if tag not in self.tags:
+                self.tags.append(tag)
+
+        addTag = add_tag
+
+    class RetryTagCollection:
+        def __init__(self, note: TagNote) -> None:
+            self.note = note
+            self.entries = [
+                {"id": 1, "name": "KanjiCards Recalc", "has_changes": True},
+                {"id": 2, "name": "Suspend", "has_changes": True},
+            ]
+            self._next_id = 3
+            self._fail_once = True
+            self.undo_calls = 0
+            self.merge_calls: list[int] = []
+
+        def add_custom_undo_entry(self, name: str) -> int:
+            entry_id = self._next_id
+            self._next_id += 1
+            self.entries.append({"id": entry_id, "name": name, "has_changes": False})
+            return entry_id
+
+        def undo_status(self):
+            if not self.entries:
+                return types.SimpleNamespace(last_step=None, undo="")
+            last = self.entries[-1]
+            return types.SimpleNamespace(last_step=last["id"], undo=last["name"])
+
+        def merge_undo_entries(self, target: int):
+            self.merge_calls.append(target)
+            if self._fail_once:
+                self._fail_once = False
+                raise RuntimeError("target undo op not found")
+            while self.entries and self.entries[-1]["id"] != target:
+                self.entries.pop()
+            if self.entries:
+                self.entries[-1]["has_changes"] = True
+            return types.SimpleNamespace(ListFields=lambda: [1])
+
+        def undo(self):
+            if not self.entries:
+                raise RuntimeError("empty undo stack")
+            entry = self.entries.pop()
+            if entry["name"].lower().startswith("suspend"):
+                self.note.tags.clear()
+            self.undo_calls += 1
+            return types.SimpleNamespace(ListFields=lambda: [1])
+
+        def set_suspended(self, ids, suspended: bool):
+            label = "Suspend" if suspended else "Unsuspend"
+            self.entries.append({"id": self._next_id, "name": label, "has_changes": bool(suspended)})
+            self._next_id += 1
+            return len(ids)
+
+        def update_note(self, note: TagNote):
+            note.flush_count += 1
+            return types.SimpleNamespace(ListFields=lambda: [1])
+
+        def get_note(self, note_id: int):
+            if note_id != self.note.id:
+                raise AssertionError("unexpected note id")
+            return self.note
+
+    note = TagNote(77)
+    collection = RetryTagCollection(note)
+
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_try_set_suspended_state",
+        lambda _collection, ids, suspended: len(ids),
+    )
+
+    manager._active_recalc_undo = 1
+    manager._pending_suspend_retry = kanjicards_module.PendingSuspendRetry(
+        card_ids=[702],
+        tag="NeedsSuspend",
+        note_ids=[77],
+    )
+
+    manager._merge_recalc_undo_step(collection)  # type: ignore[arg-type]
+
+    assert "NeedsSuspend" in note.tags
+    assert note.flush_count == 1
+    assert manager._active_recalc_undo is not None
+
+
+def test_merge_recalc_undo_step_handles_retry_without_payload(manager_with_profile, kanjicards_module, monkeypatch):
+    manager = manager_with_profile
+    manager._active_recalc_undo = 4
+    manager._pending_suspend_retry = None
+
+    def fake_coalesce(_collection, target, *, log_prefix, **kwargs):
+        if log_prefix == "step":
+            manager._pending_undo_retry = True
+        return target
+
+    monkeypatch.setattr(manager, "_coalesce_undo_stack", fake_coalesce)
+
+    class BareCollection:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=4, undo="KanjiCards Recalc")
+
+    manager._merge_recalc_undo_step(BareCollection())  # type: ignore[arg-type]
+    assert manager._active_recalc_undo == 4
+
+
+def test_merge_recalc_undo_step_merges_base_target(manager_with_profile, kanjicards_module, monkeypatch):
+    manager = manager_with_profile
+    manager._active_recalc_undo = 5
+    manager._pending_suspend_retry = None
+    manager._pending_undo_retry = False
+    calls: list[tuple[Optional[int], str, bool]] = []
+
+    def fake_coalesce(_collection, target, *, log_prefix, force_merge=False, **kwargs):
+        calls.append((target, log_prefix, force_merge))
+        if log_prefix == "step":
+            return 9
+        if log_prefix == "step/base":
+            return 6
+        return target
+
+    monkeypatch.setattr(manager, "_coalesce_undo_stack", fake_coalesce)
+
+    class DummyCollection:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=6, undo="KanjiCards Recalc")
+
+    manager._merge_recalc_undo_step(DummyCollection())  # type: ignore[arg-type]
+
+    assert manager._active_recalc_undo == 6
+    assert ("step", False) in [(prefix, force) for _, prefix, force in calls]
+    assert ("step/base", True) in [(prefix, force) for _, prefix, force in calls]
+
+
+def test_merge_recalc_undo_step_handles_none_collection(manager_with_profile):
+    manager = manager_with_profile
+    manager._active_recalc_undo = 8
+    manager._merge_recalc_undo_step(None)
+    assert manager._active_recalc_undo == 8
+
+
+def test_merge_recalc_undo_step_handles_missing_last_step(manager_with_profile, kanjicards_module, monkeypatch):
+    manager = manager_with_profile
+    manager._active_recalc_undo = 12
+    manager._pending_suspend_retry = kanjicards_module.PendingSuspendRetry(card_ids=[401], tag="NeedsSuspend", note_ids=[])
+
+    def fake_coalesce(_collection, target, *, log_prefix, **kwargs):
+        manager._pending_undo_retry = True
+        return target
+
+    monkeypatch.setattr(manager, "_coalesce_undo_stack", fake_coalesce)
+    monkeypatch.setattr(manager, "_get_last_undo_step", lambda _collection: None)
+
+    class DummyCollection:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=None, undo="")
+
+    manager._merge_recalc_undo_step(DummyCollection())  # type: ignore[arg-type]
+    assert manager._active_recalc_undo == 12
+
+
+def test_merge_recalc_undo_step_handles_undo_failure(manager_with_profile, kanjicards_module, monkeypatch):
+    manager = manager_with_profile
+    manager._active_recalc_undo = 21
+    manager._pending_suspend_retry = kanjicards_module.PendingSuspendRetry(card_ids=[501], tag="NeedsSuspend", note_ids=[])
+    monkeypatch.setattr(manager, "_debug", lambda *args, **kwargs: None)
+
+    def fake_coalesce(_collection, target, *, log_prefix, **kwargs):
+        manager._pending_undo_retry = True
+        return target
+
+    monkeypatch.setattr(manager, "_coalesce_undo_stack", fake_coalesce)
+    monkeypatch.setattr(manager, "_get_last_undo_step", lambda _collection: 99)
+
+    class FailingUndo:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=99, undo="Suspend")
+
+        def undo(self):
+            raise RuntimeError("undo failed")
+
+    manager._merge_recalc_undo_step(FailingUndo())  # type: ignore[arg-type]
+    assert manager._active_recalc_undo == 21
+
+
+def test_merge_recalc_undo_step_returns_when_target_none(manager_with_profile, kanjicards_module, monkeypatch):
+    manager = manager_with_profile
+    manager._active_recalc_undo = 31
+    manager._pending_suspend_retry = None
+
+    def fake_coalesce(_collection, target, *, log_prefix, **kwargs):
+        return None
+
+    monkeypatch.setattr(manager, "_coalesce_undo_stack", fake_coalesce)
+
+    class DummyCollection:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=0, undo="")
+
+    manager._merge_recalc_undo_step(DummyCollection())  # type: ignore[arg-type]
+    assert manager._active_recalc_undo == 31
+
+
+def test_restore_suspend_tags_for_retry_skips_blank_tag(manager_with_profile, kanjicards_module):
+    manager = manager_with_profile
+    result = manager._restore_suspend_tags_for_retry(
+        collection=types.SimpleNamespace(),
+        payload=kanjicards_module.PendingSuspendRetry(card_ids=[], tag="   ", note_ids=[1]),
+    )
+    assert result == 0
+
+
+def test_ensure_recalc_undo_entry_returns_target_when_collection_missing(manager_with_profile):
+    manager = manager_with_profile
+    assert manager._ensure_recalc_undo_entry(None, 42, log_prefix="unit") == 42
+
+
+def test_ensure_recalc_undo_entry_handles_missing_getter(manager_with_profile):
+    manager = manager_with_profile
+
+    class NoUndoStatus:
+        pass
+
+    assert manager._ensure_recalc_undo_entry(NoUndoStatus(), 7, log_prefix="unit") == 7
+
+
+def test_ensure_recalc_undo_entry_skips_when_last_step_invalid(manager_with_profile):
+    manager = manager_with_profile
+
+    class ZeroUndoStatus:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=0, undo="")
+
+    assert manager._ensure_recalc_undo_entry(ZeroUndoStatus(), 9, log_prefix="unit") == 9
+
+
+def test_ensure_recalc_undo_entry_returns_when_step_matches(manager_with_profile):
+    manager = manager_with_profile
+
+    class MatchingUndoStatus:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=15, undo="")
+
+    assert manager._ensure_recalc_undo_entry(MatchingUndoStatus(), 15, log_prefix="unit") == 15
+
+
+def test_ensure_recalc_undo_entry_uses_existing_text(manager_with_profile):
+    manager = manager_with_profile
+
+    class TextUndoStatus:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=18, undo="KanjiCards Recalc - extra")
+
+    assert manager._ensure_recalc_undo_entry(TextUndoStatus(), 4, log_prefix="unit") == 18
+
+
+def test_ensure_recalc_undo_entry_creates_fallback_entry(manager_with_profile, monkeypatch):
+    manager = manager_with_profile
+    collection = FakeUndoCollection()
+    collection.add_custom_undo_entry("Initial")
+    manager._active_recalc_undo = 100
+
+    def fake_coalesce(_collection, target, *, log_prefix, **kwargs):
+        return 55
+
+    monkeypatch.setattr(manager, "_coalesce_undo_stack", fake_coalesce)
+
+    result = manager._ensure_recalc_undo_entry(collection, 3, log_prefix="unit")
+    assert result == 55
+    assert manager._active_recalc_undo == collection.entries[-1]["id"]
+
+
+def test_ensure_recalc_undo_entry_handles_status_exception(manager_with_profile, monkeypatch):
+    manager = manager_with_profile
+
+    class FailingUndoStatus:
+        def undo_status(self):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(manager, "_debug", lambda *args, **kwargs: None)
+    assert manager._ensure_recalc_undo_entry(FailingUndoStatus(), 8, log_prefix="unit") == 8
+
+
+def test_ensure_recalc_undo_entry_uses_lastStep_attribute(manager_with_profile):
+    manager = manager_with_profile
+
+    class LegacyUndoStatus:
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=None, lastStep=23, undo="KanjiCards Recalc legacy")
+
+    assert manager._ensure_recalc_undo_entry(LegacyUndoStatus(), 4, log_prefix="unit") == 23
+
+
+def test_ensure_recalc_undo_entry_handles_missing_custom_entry(manager_with_profile, monkeypatch):
+    manager = manager_with_profile
+
+    class BasicUndoStatus:
+        def __init__(self) -> None:
+            self.called = False
+
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=9, undo="")
+
+    status = BasicUndoStatus()
+    collection = types.SimpleNamespace(undo_status=status.undo_status)
+    monkeypatch.setattr(manager, "_create_custom_undo_entry", lambda *_args, **_kwargs: None)
+    assert manager._ensure_recalc_undo_entry(collection, 2, log_prefix="unit") == 2
 
 
 def test_finalize_recalc_undo_wraps_remaining_steps(kanjicards_module):

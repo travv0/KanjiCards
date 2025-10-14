@@ -10,7 +10,7 @@ class DummySuspendCollection:
         raise AssertionError('sched should not be consulted when set_suspended exists')
 
 import types
-from typing import List
+from typing import Dict, List
 
 import pytest
 
@@ -462,6 +462,181 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
 
     assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
     assert "needssuspend" in {tag.lower() for tag in note.tags}
+    assert note.flush_count == 1
+
+
+def test_update_vocab_suspension_records_retry_payload(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+    )
+    note = SimpleNote(303)
+    collection = DummySuspendCollection()
+    captured: Dict[str, object] = {}
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {303: ({"火"}, set())},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(has_review_card=True, current_interval=0, historical_interval=0)
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {303: [(901, 0, 0)]},
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda *args, **kwargs: None,
+    )
+
+    def capture_merge(collection):
+        captured["payload"] = manager._pending_suspend_retry
+
+    monkeypatch.setattr(manager, "_merge_recalc_undo_step", capture_merge)
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    payload = captured.get("payload")
+    assert isinstance(payload, kanjicards_module.PendingSuspendRetry)
+    assert payload.card_ids == [901]
+    assert payload.note_ids == [303]
+    assert payload.tag == "NeedsSuspend"
+    assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
+    assert "needssuspend" in {tag.lower() for tag in note.tags}
+    assert note.flush_count == 1
+
+
+def test_update_vocab_suspension_without_auto_suspend_clears_tag(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=False,
+        auto_suspend_tag="NeedsSuspend",
+    )
+    note = SimpleNote(404, tags=["NeedsSuspend"])
+    collection = DummySuspendCollection()
+    unsuspended: list[int] = []
+
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {404: ({"火"}, {"NeedsSuspend"})},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(has_review_card=True, current_interval=30, historical_interval=30)
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {404: [(1201, -1, 2)]},
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+
+    def capture_unsuspend(_collection, ids):
+        unsuspended.extend(ids)
+
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        capture_unsuspend,
+    )
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 1, "notes_updated": 1}
+    assert unsuspended == [1201]
+    assert note.tags == []
+    assert note.flush_count == 1
+
+
+def test_update_vocab_suspension_updates_low_interval_tag(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(
+        kanjicards_module,
+        auto_suspend_vocab=True,
+        auto_suspend_tag="NeedsSuspend",
+        low_interval_vocab_tag="LowInterval",
+        known_kanji_interval=10,
+    )
+    note = SimpleNote(505, tags=["LowInterval"])
+    collection = DummySuspendCollection()
+    monkeypatch.setattr(
+        manager,
+        "_collect_vocab_note_chars",
+        lambda *args, **kwargs: {505: ({"火"}, {"LowInterval"})},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_compute_kanji_interval_status",
+        lambda *args, **kwargs: {
+            "火": kanjicards_module.KanjiIntervalStatus(has_review_card=True, current_interval=20, historical_interval=20)
+        },
+    )
+    monkeypatch.setattr(
+        manager,
+        "_load_card_status_for_notes",
+        lambda *args, **kwargs: {505: [(1401, 0, 0)]},
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_get_note",
+        lambda *args, **kwargs: note,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_resuspend_note_cards",
+        lambda *args, **kwargs: 1,
+    )
+    monkeypatch.setattr(
+        kanjicards_module,
+        "_unsuspend_cards",
+        lambda *args, **kwargs: None,
+    )
+
+    stats = manager._update_vocab_suspension(
+        collection,
+        cfg,
+        {1: [0]},
+        existing_notes={"火": 1},
+    )
+
+    assert "lowinterval" not in {tag.lower() for tag in note.tags}
+    assert stats == {"vocab_suspended": 0, "vocab_unsuspended": 0, "notes_updated": 1}
     assert note.flush_count == 1
 
 
