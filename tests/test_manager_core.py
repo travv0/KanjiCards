@@ -542,6 +542,54 @@ def test_merge_recalc_undo_step_replay_keeps_single_undo(kanjicards_module):
     assert collection.card_queue == 0
 
 
+def test_finalize_recalc_undo_wraps_remaining_steps(kanjicards_module):
+    manager = kanjicards_module.KanjiVocabRecalcManager.__new__(kanjicards_module.KanjiVocabRecalcManager)
+    manager._debug_enabled = False
+
+    class LaggyUndoCollection:
+        def __init__(self) -> None:
+            self.entries = [
+                {"id": 1, "name": "KanjiCards Recalc"},
+                {"id": 2, "name": "Suspend"},
+            ]
+            self._next_id = 3
+            self.merge_calls: list[int] = []
+            self._attempts = 0
+
+        def add_custom_undo_entry(self, name: str) -> int:
+            entry_id = self._next_id
+            self._next_id += 1
+            self.entries.append({"id": entry_id, "name": name})
+            return entry_id
+
+        def undo_status(self):
+            if not self.entries:
+                return types.SimpleNamespace(last_step=None, undo="")
+            last = self.entries[-1]
+            return types.SimpleNamespace(last_step=last["id"], undo=last["name"])
+
+        def merge_undo_entries(self, target: int):
+            self.merge_calls.append(target)
+            if self._attempts == 0:
+                self._attempts += 1
+                return types.SimpleNamespace(ListFields=lambda: [])
+            self._attempts += 1
+            if len(self.entries) >= 2:
+                self.entries.pop(-2)
+            if self.entries:
+                self.entries[-1]["name"] = "KanjiCards Recalc"
+            return types.SimpleNamespace(ListFields=lambda: [1])
+
+    collection = LaggyUndoCollection()
+    manager.mw = types.SimpleNamespace(col=collection)
+
+    manager._finalize_recalc_undo(collection, 1)
+
+    assert collection.entries
+    assert collection.entries[-1]["name"] == "KanjiCards Recalc"
+    assert not any(entry["name"].lower().startswith("suspend") for entry in collection.entries)
+
+
 def test_start_recalc_undo_entry_accepts_proto(manager_with_profile, monkeypatch):
     mw = types.SimpleNamespace(col=FakeUndoCollection())
     manager_with_profile.mw = mw

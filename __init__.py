@@ -1089,14 +1089,60 @@ class KanjiVocabRecalcManager:
                 message = str(err).lower()
                 if "target undo op not found" in message:
                     self._pending_undo_retry = True
-                    current = self._create_custom_undo_entry(collection, label=label)
-                    attempts += 1
-                    continue
+                    break
                 break
             _notify_op_result(changes, initiator=initiator)
             self._log_undo_state(collection, f"coalesce_merge/{log_prefix}", target=current)
             attempts += 1
         return current
+
+    def _ensure_recalc_undo_entry(
+        self,
+        collection: Optional[Collection],
+        target: Optional[int],
+        *,
+        log_prefix: str,
+    ) -> Optional[int]:
+        if collection is None:
+            return target
+        getter = getattr(collection, "undo_status", None) or getattr(collection, "undoStatus", None)
+        if not callable(getter):
+            return target
+        try:
+            status = getter()
+        except Exception as err:  # noqa: BLE001
+            self._debug(f"recalc/undo_status_failed/{log_prefix}", error=str(err))
+            return target
+        last_step_value = getattr(status, "last_step", None)
+        if last_step_value is None:
+            last_step_value = getattr(status, "lastStep", None)
+        last_step = self._coerce_undo_step_value(last_step_value)
+        if last_step is None or last_step <= 0:
+            return target
+        if last_step == target:
+            return target
+        undo_text = getattr(status, "undo", "")
+        if isinstance(undo_text, str) and undo_text.lower().startswith("kanjicards recalc"):
+            return last_step
+        new_target = self._create_custom_undo_entry(collection, label="KanjiCards Recalc")
+        if new_target is None:
+            return target
+        previous_active = getattr(self, "_active_recalc_undo", None)
+        self._active_recalc_undo = new_target
+        try:
+            merged_target = self._coalesce_undo_stack(
+                collection,
+                new_target,
+                label="KanjiCards Recalc",
+                initiator=self,
+                log_prefix=f"{log_prefix}/fallback",
+                force_merge=True,
+            )
+        finally:
+            self._active_recalc_undo = previous_active
+        if merged_target is not None:
+            return merged_target
+        return target
 
     def _start_recalc_undo_entry(self, collection: Optional[Collection]) -> Optional[int]:
         self._active_recalc_undo = None
@@ -1127,6 +1173,11 @@ class KanjiVocabRecalcManager:
             initiator=self,
             log_prefix="finalize",
         )
+        resolved_target = self._ensure_recalc_undo_entry(
+            collection,
+            resolved_target,
+            log_prefix="finalize",
+        )
         self._active_recalc_undo = None
         self._log_undo_state(collection, "finalize_complete", target=resolved_target)
 
@@ -1145,13 +1196,16 @@ class KanjiVocabRecalcManager:
             initiator=self,
             log_prefix="step",
         )
-        if self._pending_undo_retry and previous_retry_ids:
-            self._pending_undo_retry = False
+        retry_required = self._pending_undo_retry
+        self._pending_undo_retry = False
+        if retry_required and previous_retry_ids:
             retry_ids = list(dict.fromkeys(previous_retry_ids))
             undone = False
             while True:
                 last_step = self._get_last_undo_step(collection)
-                if last_step is None or (target is not None and last_step <= target):
+                if last_step is None:
+                    break
+                if target is not None and last_step <= target:
                     break
                 try:
                     undo_result = collection.undo()
@@ -1177,17 +1231,25 @@ class KanjiVocabRecalcManager:
                             log_prefix="step/retry",
                             force_merge=True,
                         )
-            if base_target is not None:
-                target = self._coalesce_undo_stack(
-                    collection,
-                    base_target,
-                    label="KanjiCards Recalc",
-                    initiator=self,
-                    log_prefix="step/base",
-                    force_merge=True,
-                )
+                        base_target = target
+        elif retry_required:
+            self._log_undo_state(collection, "merge_step_retry_skipped", target=target)
         if target is None:
             return
+        should_merge_base = (
+            base_target is not None
+            and target is not None
+            and base_target != target
+        )
+        if should_merge_base:
+            target = self._coalesce_undo_stack(
+                collection,
+                base_target,
+                label="KanjiCards Recalc",
+                initiator=self,
+                log_prefix="step/base",
+                force_merge=True,
+            )
         self._active_recalc_undo = target
         self._log_undo_state(collection, "merge_step_complete", target=target)
 
