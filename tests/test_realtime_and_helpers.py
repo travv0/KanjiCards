@@ -1,4 +1,5 @@
 import types
+from collections import deque
 
 import pytest
 
@@ -304,6 +305,69 @@ def test_process_reviewed_card_skips_merge_when_no_vocab_change(manager, kanjica
     manager._process_reviewed_card(card)
 
     assert collection.merged == []
+
+
+def test_process_reviewed_card_merges_each_review_step_separately(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(kanjicards_module)
+    manager.load_config = lambda: cfg
+
+    kanji_model = {"id": 10, "name": "Kanji", "flds": [{"name": "Character"}]}
+    monkeypatch.setattr(
+        manager,
+        "_get_kanji_model_context",
+        lambda *args, **kwargs: (kanji_model, {"kanji": 0}, 0),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_vocab_model_map",
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_existing_kanji_notes",
+        lambda *args, **kwargs: {"火": 1, "水": 2},
+    )
+
+    class TrackingCollection:
+        def __init__(self):
+            self.steps = deque([100, 100, 101, 101])
+            self.merge_targets = []
+
+        def undo_status(self):
+            if self.steps:
+                value = self.steps.popleft()
+            else:
+                value = 101
+            return types.SimpleNamespace(last_step=value)
+
+        def merge_undo_entries(self, target):
+            self.merge_targets.append(target)
+
+        def add_custom_undo_entry(self, name):
+            raise AssertionError("unexpected custom undo entry creation")
+
+    collection = TrackingCollection()
+    manager.mw.col = collection
+
+    def fake_update(collection_arg, *_args, **_kwargs):
+        manager._merge_recalc_undo_step(collection_arg)
+        return {"vocab_unsuspended": 1, "vocab_suspended": 0, "notes_updated": 0}
+
+    monkeypatch.setattr(manager, "_update_vocab_suspension", fake_update)
+
+    note_one = FakeNote(mid=10, fields=["火"], note_id=5)
+    card_one = FakeCard(333, note_one)
+    manager._pre_answer_card_state[333] = {"type": 2, "queue": 2, "note_id": 5}
+    manager._last_question_card_id = 333
+    manager._process_reviewed_card(card_one)
+
+    note_two = FakeNote(mid=10, fields=["水"], note_id=6)
+    card_two = FakeCard(444, note_two)
+    manager._pre_answer_card_state[444] = {"type": 2, "queue": 2, "note_id": 6}
+    manager._last_question_card_id = 444
+    manager._process_reviewed_card(card_two)
+
+    assert collection.merge_targets == [100, 100]
 
 
 def test_process_reviewed_card_fetches_note_on_failure(manager, kanjicards_module, monkeypatch):

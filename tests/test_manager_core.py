@@ -418,6 +418,32 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
     assert mw.col.merge_calls == [1, 1, 4]
 
 
+def test_merge_recalc_undo_step_ignores_without_active_target(manager_with_profile, kanjicards_module):
+    manager = manager_with_profile
+
+    class TrackingCollection:
+        def __init__(self) -> None:
+            self.merge_calls = []
+            self.custom_entries = []
+
+        def merge_undo_entries(self, target: int):
+            self.merge_calls.append(target)
+
+        def add_custom_undo_entry(self, name: str) -> int:
+            self.custom_entries.append(name)
+            return 42
+
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=1)
+
+    collection = TrackingCollection()
+    manager._active_recalc_undo = None
+    manager._pending_undo_retry = True
+    manager._merge_recalc_undo_step(collection)  # type: ignore[arg-type]
+    assert collection.merge_calls == []
+    assert manager._pending_undo_retry is False
+
+
 def test_merge_recalc_undo_step_recovers_missing_target(manager_with_profile, kanjicards_module):
     manager = manager_with_profile
 

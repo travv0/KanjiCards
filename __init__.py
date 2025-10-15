@@ -1203,7 +1203,12 @@ class KanjiVocabRecalcManager:
 
     def _merge_recalc_undo_step(self, collection: Optional[Collection]) -> None:
         target = self._active_recalc_undo
+        if target is None:
+            self._pending_undo_retry = False
+            self._log_undo_state(collection, "merge_step_skip_no_target")
+            return
         if collection is None:
+            self._pending_undo_retry = False
             return
         base_target = target
         self._log_undo_state(collection, "merge_step_begin", target=target)
