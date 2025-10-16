@@ -221,13 +221,6 @@ class AddonConfig:
 
 
 @dataclass
-class PendingSuspendRetry:
-    card_ids: List[int]
-    tag: str
-    note_ids: List[int]
-
-
-@dataclass
 class KanjiUsageInfo:
     reviewed: bool = False
     first_review_order: Optional[int] = None
@@ -263,11 +256,8 @@ class KanjiVocabRecalcManager:
         self._missing_deck_logged = False
         self._sync_hook_installed = False
         self._sync_hook_target: Optional[str] = None
-        self._active_recalc_undo: Optional[int] = None
         self._profile_config_error_logged = False
         self._profile_state_error_logged = False
-        self._pending_suspend_retry: Optional[PendingSuspendRetry] = None
-        self._pending_undo_retry = False
         self._pre_answer_card_state: Dict[int, Dict[str, Optional[int]]] = {}
         self._last_question_card_id: Optional[int] = None
         self._debug_path: Optional[str] = None
@@ -293,39 +283,11 @@ class KanjiVocabRecalcManager:
         self._install_sync_hook()
         self.mw.addonManager.setConfigAction(__name__, self.show_settings)
         self._suppress_next_auto_sync = False
-        self._recalc_undo_floor: Optional[int] = None
+        self._recalc_undo_target: Optional[int] = None
 
     # ------------------------------------------------------------------
     # Configuration helpers
     # ------------------------------------------------------------------
-    def _log_undo_state(
-        self,
-        collection: Optional[Collection],
-        label: str,
-        **extra: object,
-    ) -> None:
-        if not getattr(self, "_debug_enabled", False):
-            return
-        info: Dict[str, object] = {"label": label}
-        info.update({key: value for key, value in extra.items() if value is not None})
-        if collection is not None:
-            try:
-                status = collection.undo_status()
-            except Exception as err:  # noqa: BLE001
-                info["status_error"] = str(err)
-            else:
-                undo_text = getattr(status, "undo", None)
-                redo_text = getattr(status, "redo", None)
-                last_step_value = getattr(status, "last_step", None)
-                info["undo_text"] = undo_text
-                info["redo_text"] = redo_text
-                info["last_step"] = self._coerce_undo_step_value(last_step_value)
-        else:
-            info["status_error"] = "no_collection"
-        self._debug("undo_state", **info)
-        parts = [f"{key}={value}" for key, value in info.items()]
-        _safe_print("[KanjiCards][undo] " + ", ".join(parts))
-
     def _profile_config_path(self) -> Optional[str]:
         pm = getattr(self.mw, "pm", None)
         if pm is None:
@@ -1002,7 +964,7 @@ class KanjiVocabRecalcManager:
 
     def run_recalc(self) -> None:
         collection = getattr(self.mw, "col", None)
-        undo_target = self._start_recalc_undo_entry(collection)
+        undo_target = self._begin_recalc_undo(collection)
         progress_obj = getattr(self.mw, "progress", None)
         self.mw.progress.start(label="Preparing KanjiCards…", immediate=True)
         progress_tracker: Optional[Dict[str, object]] = None
@@ -1022,299 +984,92 @@ class KanjiVocabRecalcManager:
             self._pending_vocab_sync_marker = None
             self._pending_config_hash = None
             self.mw.progress.finish()
-            current_target = self._active_recalc_undo or undo_target
-            self._finalize_recalc_undo(collection, current_target)
+            self._finalize_recalc_undo(collection, undo_target)
             show_critical(f"KanjiCards recalc failed:\n{err}")
             return None
         else:
             self.mw.progress.finish()
             self._commit_vocab_sync_marker(cfg)
             self._notify_summary(stats)
-            current_target = self._active_recalc_undo or undo_target
-            self._finalize_recalc_undo(collection, current_target)
+            self._finalize_recalc_undo(collection, undo_target)
             self.mw.reset()
             return stats
 
-    def _create_custom_undo_entry(self, collection: Optional[Collection], *, label: str) -> Optional[int]:
+    def _begin_recalc_undo(self, collection: Optional[Collection]) -> Optional[int]:
         if collection is None:
+            self._recalc_undo_target = None
             return None
         creator = getattr(collection, "add_custom_undo_entry", None)
         if not callable(creator):
+            self._recalc_undo_target = None
+            self._checkpoint_fallback()
             return None
         try:
-            entry = creator(label)
+            entry = creator("KanjiCards Recalc")
         except Exception as err:  # noqa: BLE001
             self._debug("recalc/undo_entry_create_failed", error=str(err))
+            self._recalc_undo_target = None
+            self._checkpoint_fallback()
             return None
         target = self._coerce_undo_step_value(entry)
         if target is None:
             self._debug("recalc/undo_entry_invalid", entry_type=type(entry).__name__)
+            self._checkpoint_fallback()
+            self._recalc_undo_target = None
             return None
-        self._active_recalc_undo = target
-        self._log_undo_state(collection, "custom_undo_entry_created", target=target)
+        self._recalc_undo_target = target
         return target
 
-    def _coalesce_undo_stack(
+    def _finalize_recalc_undo(
         self,
         collection: Optional[Collection],
-        target: Optional[int],
-        *,
-        label: str,
-        initiator: object,
-        log_prefix: str,
-        force_merge: bool = False,
-    ) -> Optional[int]:
+        undo_target: Optional[int],
+    ) -> None:
         if collection is None:
-            return None
-        current = target
-        attempts = 0
-        floor = getattr(self, "_recalc_undo_floor", None)
-        while attempts < 50:
-            last_step = self._get_last_undo_step(collection)
-            if last_step is None:
-                if current is not None:
-                    return current
-                current = self._create_custom_undo_entry(collection, label=label)
-                attempts += 1
-                continue
-            if current is None:
-                current = self._create_custom_undo_entry(collection, label=label)
-                attempts += 1
-                continue
-            if floor is not None:
-                if current is not None and current <= floor:
-                    return current
-                if last_step <= floor:
-                    return current
-            if last_step == current and not force_merge:
-                return current
-            force_merge = False
-            merger = getattr(collection, "merge_undo_entries", None)
-            if not callable(merger):
-                return current
-            try:
-                changes = merger(current)
-            except Exception as err:  # noqa: BLE001
-                self._debug(
-                    f"recalc/undo_entry_coalesce_failed/{log_prefix}",
-                    target=current,
-                    error=str(err),
-                )
-                message = str(err).lower()
-                if "target undo op not found" in message:
-                    self._pending_undo_retry = True
-                    break
-                break
-            _notify_op_result(changes, initiator=initiator)
-            self._log_undo_state(collection, f"coalesce_merge/{log_prefix}", target=current)
-            attempts += 1
-        return current
-
-    def _ensure_recalc_undo_entry(
-        self,
-        collection: Optional[Collection],
-        target: Optional[int],
-        *,
-        log_prefix: str,
-    ) -> Optional[int]:
-        if collection is None:
-            return target
-        getter = getattr(collection, "undo_status", None) or getattr(collection, "undoStatus", None)
-        if not callable(getter):
-            return target
-        try:
-            status = getter()
-        except Exception as err:  # noqa: BLE001
-            self._debug(f"recalc/undo_status_failed/{log_prefix}", error=str(err))
-            return target
-        last_step_value = getattr(status, "last_step", None)
-        if last_step_value is None:
-            last_step_value = getattr(status, "lastStep", None)
-        last_step = self._coerce_undo_step_value(last_step_value)
-        if last_step is None or last_step <= 0:
-            return target
-        if last_step == target:
-            return target
-        undo_text = getattr(status, "undo", "")
-        if isinstance(undo_text, str) and undo_text.lower().startswith("kanjicards recalc"):
-            return last_step
-        new_target = self._create_custom_undo_entry(collection, label="KanjiCards Recalc")
-        if new_target is None:
-            return target
-        previous_active = getattr(self, "_active_recalc_undo", None)
-        self._active_recalc_undo = new_target
-        try:
-            merged_target = self._coalesce_undo_stack(
-                collection,
-                new_target,
-                label="KanjiCards Recalc",
-                initiator=self,
-                log_prefix=f"{log_prefix}/fallback",
-                force_merge=True,
-            )
-        finally:
-            self._active_recalc_undo = previous_active
-        if merged_target is not None:
-            return merged_target
-        return target
-
-    def _start_recalc_undo_entry(self, collection: Optional[Collection]) -> Optional[int]:
-        self._active_recalc_undo = None
-        if collection is None:
-            self._recalc_undo_floor = None
-        else:
-            self._recalc_undo_floor = self._get_last_undo_step(collection)
-        target = self._create_custom_undo_entry(collection, label="KanjiCards Recalc")
-        if target is not None:
-            self._log_undo_state(collection, "start_recalc_entry_created", target=target)
-            return target
-        checkpoint = getattr(self.mw, "checkpoint", None)
-        if callable(checkpoint):
-            try:
-                checkpoint("KanjiCards")
-            except Exception as err:  # noqa: BLE001
-                self._debug("recalc/checkpoint_failed", error=str(err))
-            else:
-                self._log_undo_state(collection, "start_recalc_checkpoint")
-        return None
-
-    def _finalize_recalc_undo(self, collection: Optional[Collection], undo_target: Optional[int]) -> None:
-        if undo_target is None or collection is None:
-            self._active_recalc_undo = None
-            self._recalc_undo_floor = None
+            self._recalc_undo_target = None
             return
-        self._active_recalc_undo = undo_target
-        self._log_undo_state(collection, "finalize_begin", target=undo_target)
-        resolved_target = self._coalesce_undo_stack(
-            collection,
-            undo_target,
-            label="KanjiCards Recalc",
-            initiator=self,
-            log_prefix="finalize",
-        )
-        resolved_target = self._ensure_recalc_undo_entry(
-            collection,
-            resolved_target,
-            log_prefix="finalize",
-        )
-        self._active_recalc_undo = None
-        self._log_undo_state(collection, "finalize_complete", target=resolved_target)
-        self._recalc_undo_floor = None
+        if undo_target is None and self._recalc_undo_target is None:
+            return
+        self._merge_recalc_undo_step(collection)
+        self._recalc_undo_target = None
 
     def _merge_recalc_undo_step(self, collection: Optional[Collection]) -> None:
-        target = self._active_recalc_undo
-        if target is None:
-            self._pending_undo_retry = False
-            self._log_undo_state(collection, "merge_step_skip_no_target")
-            return
         if collection is None:
-            self._pending_undo_retry = False
             return
-        base_target = target
-        self._log_undo_state(collection, "merge_step_begin", target=target)
-        retry_payload = self._pending_suspend_retry
-        self._pending_undo_retry = False
-        target = self._coalesce_undo_stack(
-            collection,
-            target,
-            label="KanjiCards Recalc",
-            initiator=self,
-            log_prefix="step",
-        )
-        retry_required = self._pending_undo_retry
-        self._pending_undo_retry = False
-        if retry_required and retry_payload and retry_payload.card_ids:
-            retry_ids = list(dict.fromkeys(retry_payload.card_ids))
-            undone = False
-            while True:
-                last_step = self._get_last_undo_step(collection)
-                if last_step is None:
-                    break
-                if target is not None and last_step <= target:
-                    break
-                floor = getattr(self, "_recalc_undo_floor", None)
-                if floor is not None and last_step <= floor:
-                    break
-                try:
-                    undo_result = collection.undo()
-                except Exception as err:  # noqa: BLE001
-                    self._debug("recalc/undo_retry_failed", error=str(err))
-                    break
-                else:
-                    _notify_op_result(undo_result, initiator=self)
-                    undone = True
-            if undone and retry_ids:
-                retry_target = self._create_custom_undo_entry(collection, label="KanjiCards Recalc")
-                if retry_target is not None:
-                    previous_active = self._active_recalc_undo
-                    self._active_recalc_undo = retry_target
-                    try:
-                        replay_count = _normalize_count(
-                            _try_set_suspended_state(collection, retry_ids, suspended=True)
-                        )
-                        if replay_count:
-                            self._restore_suspend_tags_for_retry(collection, retry_payload)
-                            target = self._coalesce_undo_stack(
-                                collection,
-                                retry_target,
-                                label="KanjiCards Recalc",
-                                initiator=self,
-                                log_prefix="step/retry",
-                                force_merge=True,
-                            )
-                            base_target = target
-                    finally:
-                        self._active_recalc_undo = previous_active if previous_active is not None else retry_target
-            elif retry_required:
-                self._log_undo_state(collection, "merge_step_retry_skipped", target=target)
-        elif retry_required:
-            self._log_undo_state(collection, "merge_step_retry_skipped", target=target)
+        merger = getattr(collection, "merge_undo_entries", None)
+        if not callable(merger):
+            return
+        target = self._recalc_undo_target
         if target is None:
-            return
-        should_merge_base = (
-            base_target is not None
-            and target is not None
-            and base_target != target
-        )
-        if should_merge_base:
-            target = self._coalesce_undo_stack(
-                collection,
-                base_target,
-                label="KanjiCards Recalc",
-                initiator=self,
-                log_prefix="step/base",
-                force_merge=True,
+            target = self._get_last_undo_step(collection)
+            if target is None:
+                return
+            self._recalc_undo_target = target
+        try:
+            changes = merger(target)
+        except Exception as err:  # noqa: BLE001
+            self._debug(
+                "recalc/undo_merge_failed",
+                target=target,
+                error=str(err),
             )
-        self._active_recalc_undo = target
-        self._log_undo_state(collection, "merge_step_complete", target=target)
+            latest = self._get_last_undo_step(collection)
+            if latest is not None:
+                self._recalc_undo_target = latest
+            return
+        _notify_op_result(changes, initiator=self)
+        latest = self._get_last_undo_step(collection)
+        if latest is not None:
+            self._recalc_undo_target = latest
 
-    def _restore_suspend_tags_for_retry(
-        self,
-        collection: Collection,
-        payload: PendingSuspendRetry,
-    ) -> int:
-        tag = payload.tag.strip()
-        if not tag:
-            return 0
-        tag_lower = tag.lower()
-        updated = 0
-        for note_id in payload.note_ids:
-            try:
-                note = _get_note(collection, note_id)
-            except Exception as err:  # noqa: BLE001
-                self._debug("recalc/retry_note_load_failed", note_id=note_id, error=str(err))
-                continue
-            existing_lower = {value.lower() for value in getattr(note, "tags", []) if isinstance(value, str)}
-            if tag_lower in existing_lower:
-                continue
-            _add_tag(note, tag)
-            try:
-                _commit_note_changes(collection, note)
-            except Exception as err:  # noqa: BLE001
-                self._debug("recalc/retry_note_commit_failed", note_id=note_id, error=str(err))
-                continue
-            updated += 1
-        return updated
+    def _checkpoint_fallback(self) -> None:
+        checkpoint = getattr(self.mw, "checkpoint", None)
+        if not callable(checkpoint):
+            return
+        try:
+            checkpoint("KanjiCards")
+        except Exception as err:  # noqa: BLE001
+            self._debug("recalc/checkpoint_failed", error=str(err))
 
     def _coerce_undo_step_value(self, value: object) -> Optional[int]:
         if value is None:
@@ -3343,7 +3098,8 @@ class KanjiVocabRecalcManager:
                                 _unsuspend_cards(collection, suspended_cards),
                             )
                             stats["vocab_unsuspended"] += unsuspended_count
-                            self._merge_recalc_undo_step(collection)
+                            if unsuspended_count:
+                                self._merge_recalc_undo_step(collection)
                         if _remove_tag_case_insensitive(note_obj_local, tag):
                             changed = True
                             note_has_tag = False
@@ -3357,7 +3113,8 @@ class KanjiVocabRecalcManager:
                             _unsuspend_cards(collection, suspended_cards),
                         )
                         stats["vocab_unsuspended"] += unsuspended_count
-                        self._merge_recalc_undo_step(collection)
+                        if unsuspended_count:
+                            self._merge_recalc_undo_step(collection)
                     if _remove_tag_case_insensitive(note_obj_local, tag):
                         changed = True
                         note_has_tag = False
@@ -3383,25 +3140,14 @@ class KanjiVocabRecalcManager:
                 self._merge_recalc_undo_step(collection)
                 stats["notes_updated"] += 1
 
-        if pending_suspend_cards:
-            unique_ids = list(dict.fromkeys(pending_suspend_cards))
-            suspended_count = _normalize_count(
-                _try_set_suspended_state(collection, unique_ids, suspended=True)
-            )
-            if suspended_count:
-                stats["vocab_suspended"] += suspended_count
-                previous_retry = self._pending_suspend_retry
-                retry_tag = tag if isinstance(tag, str) else ""
-                retry_notes = sorted(pending_suspend_notes)
-                self._pending_suspend_retry = PendingSuspendRetry(
-                    card_ids=unique_ids,
-                    tag=retry_tag,
-                    note_ids=retry_notes,
+            if pending_suspend_cards:
+                unique_ids = list(dict.fromkeys(pending_suspend_cards))
+                suspended_count = _normalize_count(
+                    _try_set_suspended_state(collection, unique_ids, suspended=True)
                 )
-                try:
+                if suspended_count:
+                    stats["vocab_suspended"] += suspended_count
                     self._merge_recalc_undo_step(collection)
-                finally:
-                    self._pending_suspend_retry = previous_retry
 
         return stats
 
@@ -3454,6 +3200,7 @@ class KanjiVocabRecalcManager:
         deck_id = self._resolve_deck_id(collection, kanji_model, cfg)
         if not _add_note(collection, note, deck_id):
             return None
+        self._merge_recalc_undo_step(collection)
         return getattr(note, "id", None)
 
     def _assign_field(self, note: Note, field_name: Optional[str], value: str) -> None:

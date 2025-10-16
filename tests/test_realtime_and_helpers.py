@@ -84,9 +84,7 @@ def manager(kanjicards_module):
     manager._suppress_next_auto_sync = False
     manager._last_synced_config_hash = None
     manager._pending_config_hash = None
-    manager._active_recalc_undo = None
-    manager._pending_suspend_retry = None
-    manager._pending_undo_retry = False
+    manager._recalc_undo_target = None
     return manager
 
 
@@ -350,7 +348,6 @@ def test_process_reviewed_card_merges_each_review_step_separately(manager, kanji
     manager.mw.col = collection
 
     def fake_update(collection_arg, *_args, **_kwargs):
-        manager._merge_recalc_undo_step(collection_arg)
         return {"vocab_unsuspended": 1, "vocab_suspended": 0, "notes_updated": 0}
 
     monkeypatch.setattr(manager, "_update_vocab_suspension", fake_update)

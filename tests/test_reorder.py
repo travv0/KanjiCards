@@ -134,9 +134,7 @@ def build_environment(kanjicards_module, reorder_mode):
     manager._last_synced_config_hash = None
     manager._pending_config_hash = None
     manager._suppress_next_auto_sync = False
-    manager._active_recalc_undo = None
-    manager._pending_suspend_retry = None
-    manager._pending_undo_retry = False
+    manager._recalc_undo_target = None
 
     kanji_model = {
         "id": 900,
@@ -320,9 +318,6 @@ def test_build_reorder_key_vocab_bucket_sorting(kanjicards_module):
     manager._profile_state_error_logged = False
     manager._last_synced_config_hash = None
     manager._pending_config_hash = None
-    manager._active_recalc_undo = None
-    manager._pending_suspend_retry = None
-    manager._pending_undo_retry = False
     cases = [
         (
             101,

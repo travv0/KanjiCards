@@ -165,9 +165,7 @@ def manager(kanjicards_module):
     manager._last_synced_config_hash = None
     manager._pending_config_hash = None
     manager._suppress_next_auto_sync = False
-    manager._active_recalc_undo = None
-    manager._pending_suspend_retry = None
-    manager._pending_undo_retry = False
+    manager._recalc_undo_target = None
     return manager
 
 
@@ -465,7 +463,7 @@ def test_update_vocab_suspension_auto_suspend(manager, kanjicards_module, monkey
     assert note.flush_count == 1
 
 
-def test_update_vocab_suspension_records_retry_payload(manager, kanjicards_module, monkeypatch):
+def test_update_vocab_suspension_suspends_cards(manager, kanjicards_module, monkeypatch):
     cfg = make_config(
         kanjicards_module,
         auto_suspend_vocab=True,
@@ -473,7 +471,6 @@ def test_update_vocab_suspension_records_retry_payload(manager, kanjicards_modul
     )
     note = SimpleNote(303)
     collection = DummySuspendCollection()
-    captured: Dict[str, object] = {}
 
     monkeypatch.setattr(
         manager,
@@ -507,12 +504,6 @@ def test_update_vocab_suspension_records_retry_payload(manager, kanjicards_modul
         "_unsuspend_cards",
         lambda *args, **kwargs: None,
     )
-
-    def capture_merge(collection):
-        captured["payload"] = manager._pending_suspend_retry
-
-    monkeypatch.setattr(manager, "_merge_recalc_undo_step", capture_merge)
-
     stats = manager._update_vocab_suspension(
         collection,
         cfg,
@@ -520,11 +511,6 @@ def test_update_vocab_suspension_records_retry_payload(manager, kanjicards_modul
         existing_notes={"火": 1},
     )
 
-    payload = captured.get("payload")
-    assert isinstance(payload, kanjicards_module.PendingSuspendRetry)
-    assert payload.card_ids == [901]
-    assert payload.note_ids == [303]
-    assert payload.tag == "NeedsSuspend"
     assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
     assert "needssuspend" in {tag.lower() for tag in note.tags}
     assert note.flush_count == 1
@@ -652,12 +638,14 @@ def test_update_vocab_suspension_retains_tag_when_merge_fails(manager, kanjicard
         def __init__(self) -> None:
             self.undo_calls = 0
             self.suspend_calls = []
+            self.merge_calls = []
             self.last_step = 2
 
         def set_suspended(self, ids, suspended):
             self.suspend_calls.append((list(ids), bool(suspended)))
 
         def merge_undo_entries(self, target):
+            self.merge_calls.append(target)
             raise Exception("target undo op not found")
 
         def add_custom_undo_entry(self, label):
@@ -708,9 +696,6 @@ def test_update_vocab_suspension_retains_tag_when_merge_fails(manager, kanjicard
         "_unsuspend_cards",
         lambda *args, **kwargs: None,
     )
-
-    manager._active_recalc_undo = 1
-
     stats = manager._update_vocab_suspension(
         collection,
         cfg,
@@ -720,8 +705,9 @@ def test_update_vocab_suspension_retains_tag_when_merge_fails(manager, kanjicard
 
     assert stats == {"vocab_suspended": 1, "vocab_unsuspended": 0, "notes_updated": 1}
     assert "needssuspend" in {tag.lower() for tag in note.tags}
-    assert note.flush_count == 2
-    assert collection.undo_calls == 1
+    assert note.flush_count == 1
+    assert collection.undo_calls == 0
+    assert collection.merge_calls == [2, 2]
 
 
 def test_update_vocab_suspension_skips_tag_when_already_suspended(manager, kanjicards_module, monkeypatch):
