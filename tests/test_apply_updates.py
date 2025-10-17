@@ -76,6 +76,13 @@ class FakeDB:
                 for card_id, card in self.collection.cards.items()
                 if card["nid"] == note_id
             ]
+        if sql_simple.startswith("SELECT id, nid, queue, type FROM cards WHERE nid IN"):
+            note_ids = [int(value) for value in params]
+            return [
+                (card_id, card["nid"], card.get("queue", 0), card.get("type", 0))
+                for card_id, card in self.collection.cards.items()
+                if card["nid"] in note_ids
+            ]
         if sql_simple.startswith("SELECT COUNT(*), MAX(mod) FROM notes WHERE mid IN"):
             mids = {int(mid) for mid in params}
             matching = [note for note in self.collection.notes.values() if note.mid in mids]
@@ -385,6 +392,55 @@ def test_apply_updates_creates_new_notes_and_prunes_old(manager, kanjicards_modu
     assert "existing" not in old_note.tags
     assert "unsuspend" not in old_note.tags
     assert collection.cards[21]["queue"] == -1
+
+
+def test_apply_updates_skips_resuspending_reviewed_kanji(manager, kanjicards_module, monkeypatch):
+    model = make_model()
+    old_note = FakeNote(
+        1,
+        model,
+        initial={"Character": "火"},
+        tags=["existing", "unsuspend", "created"],
+    )
+    collection = FakeCollection(
+        model,
+        notes=[old_note],
+        cards=[
+            {"id": 21, "nid": 1, "queue": 2, "type": 2, "mod": 0, "usn": 0},
+        ],
+    )
+    cfg = make_config(kanjicards_module)
+    monkeypatch.setattr(manager, "_resolve_deck_id", lambda *_: 1)
+
+    usage = {}
+    dictionary = {
+        "水": {
+            "definition": "water",
+            "stroke_count": 4,
+            "kunyomi": ["みず"],
+            "onyomi": ["スイ"],
+            "frequency": 50,
+        },
+        "火": {"frequency": 12},
+    }
+    field_indexes = {"kanji": 0, "frequency": 5, "definition": 1, "stroke_count": 2, "kunyomi": 3, "onyomi": 4}
+
+    stats = manager._apply_kanji_updates(
+        collection,
+        ["水"],
+        dictionary,
+        model,
+        field_indexes,
+        0,
+        cfg,
+        usage,
+        existing_notes={"火": 1},
+        prune_existing=True,
+    )
+
+    assert stats["tag_removed"] == 1
+    assert stats["resuspended"] == 0
+    assert collection.cards[21]["queue"] == 2
 
 
 class SimpleNote:

@@ -2389,6 +2389,8 @@ class KanjiVocabRecalcManager:
         created_tag_lower = created_tag.lower() if created_tag else ""
         unsuspend_clean = (unsuspend_tag or "").strip()
         unsuspend_lower = unsuspend_clean.lower() if unsuspend_clean else ""
+        note_ids = list(dict.fromkeys(existing_notes.values()))
+        card_status_map = self._load_card_status_for_notes(collection, note_ids)
         for kanji_char, note_id in existing_notes.items():
             if kanji_char in active_chars:
                 continue
@@ -2424,10 +2426,22 @@ class KanjiVocabRecalcManager:
             if created_tag_lower and created_tag_lower in tag_lookup:
                 resuspend_needed = True
             if resuspend_needed:
-                resuspended = _normalize_count(_resuspend_note_cards(collection, note))
-                if resuspended:
-                    resuspended_total += resuspended
-                    self._merge_recalc_undo_step(collection)
+                note_cards = card_status_map.get(note_id, [])
+                has_non_new_card = any(
+                    isinstance(card_type, int) and card_type != 0
+                    for _, _, card_type in note_cards
+                )
+                if has_non_new_card:
+                    self._debug(
+                        "remove_unused_skip_reviewed_resuspend",
+                        note_id=note_id,
+                        chars=kanji_char,
+                    )
+                else:
+                    resuspended = _normalize_count(_resuspend_note_cards(collection, note))
+                    if resuspended:
+                        resuspended_total += resuspended
+                        self._merge_recalc_undo_step(collection)
             self._update_kanji_status_tags(
                 note,
                 cfg,
