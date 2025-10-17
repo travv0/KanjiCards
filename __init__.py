@@ -3162,6 +3162,8 @@ class KanjiVocabRecalcManager:
                 if suspended_count:
                     stats["vocab_suspended"] += suspended_count
                     self._merge_recalc_undo_step(collection)
+                pending_suspend_cards.clear()
+                pending_suspend_notes.clear()
 
         return stats
 
