@@ -394,6 +394,60 @@ def test_apply_updates_creates_new_notes_and_prunes_old(manager, kanjicards_modu
     assert collection.cards[21]["queue"] == -1
 
 
+def test_apply_updates_refreshes_existing_cache_when_creating_notes(manager, kanjicards_module, monkeypatch):
+    model = make_model()
+    collection = FakeCollection(model)
+    cfg = make_config(kanjicards_module)
+    field_indexes = {"kanji": 0, "definition": 1, "stroke_count": 2, "kunyomi": 3, "onyomi": 4, "frequency": 5}
+    dictionary = {
+        "咥": {
+            "definition": "to hold in the mouth",
+            "stroke_count": 11,
+            "kunyomi": ["くわ.える"],
+            "onyomi": ["テイ"],
+            "frequency": 1234,
+        },
+    }
+    usage = {"咥": kanjicards_module.KanjiUsageInfo(reviewed=False)}
+    monkeypatch.setattr(manager, "_resolve_deck_id", lambda *_: 1)
+
+    cache_map: Dict[str, int] = {}
+    manager._existing_notes_cache = {"key": (model["id"], field_indexes["kanji"]), "mapping": cache_map}
+
+    stats_first = manager._apply_kanji_updates(
+        collection,
+        ["咥"],
+        dictionary,
+        model,
+        field_indexes,
+        field_indexes["kanji"],
+        cfg,
+        usage_info=usage,
+        existing_notes=dict(cache_map),
+        prune_existing=False,
+    )
+
+    assert stats_first["created"] == 1
+    created_note = next(note for note in collection.notes.values() if note["Character"] == "咥")
+    assert cache_map.get("咥") == created_note.id
+
+    stats_second = manager._apply_kanji_updates(
+        collection,
+        ["咥"],
+        dictionary,
+        model,
+        field_indexes,
+        field_indexes["kanji"],
+        cfg,
+        usage_info=usage,
+        existing_notes=None,
+        prune_existing=False,
+    )
+
+    assert stats_second["created"] == 0
+    assert len([note for note in collection.notes.values() if note["Character"] == "咥"]) == 1
+
+
 def test_apply_updates_skips_resuspending_reviewed_kanji(manager, kanjicards_module, monkeypatch):
     model = make_model()
     old_note = FakeNote(

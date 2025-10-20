@@ -2249,6 +2249,41 @@ class KanjiVocabRecalcManager:
         self._existing_notes_cache = {"key": key, "mapping": mapping}
         return mapping
 
+    def _update_existing_notes_cache_entry(
+        self,
+        kanji_model: NotetypeDict,
+        kanji_field_index: Optional[int],
+        kanji_char: str,
+        note_id: Optional[int],
+    ) -> None:
+        if not isinstance(note_id, int) or note_id <= 0:
+            return
+        if not isinstance(kanji_char, str) or not kanji_char:
+            return
+        if kanji_field_index is None:
+            return
+
+        model_id: Optional[int]
+        if isinstance(kanji_model, dict):
+            model_id = kanji_model.get("id")
+        else:
+            getter = getattr(kanji_model, "get", None)
+            if callable(getter):
+                model_id = getter("id")
+            else:
+                model_id = getattr(kanji_model, "id", None)
+        if not isinstance(model_id, int):
+            return
+
+        cache = self._existing_notes_cache
+        if not isinstance(cache, dict):
+            return
+        if cache.get("key") != (model_id, kanji_field_index):
+            return
+        mapping = cache.get("mapping")
+        if isinstance(mapping, dict):
+            mapping[kanji_char] = note_id
+
     def _ensure_note_tagged(self, collection: Collection, note_id: int, tag: str) -> Tuple[bool, Note]:
         note = _get_note(collection, note_id)
         if not tag:
@@ -3216,8 +3251,15 @@ class KanjiVocabRecalcManager:
         deck_id = self._resolve_deck_id(collection, kanji_model, cfg)
         if not _add_note(collection, note, deck_id):
             return None
+        note_id = getattr(note, "id", None)
+        self._update_existing_notes_cache_entry(
+            kanji_model,
+            field_indexes.get("kanji"),
+            kanji_char,
+            note_id,
+        )
         self._merge_recalc_undo_step(collection)
-        return getattr(note, "id", None)
+        return note_id
 
     def _assign_field(self, note: Note, field_name: Optional[str], value: str) -> None:
         if not field_name:
