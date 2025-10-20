@@ -264,7 +264,10 @@ class KanjiVocabRecalcManager:
         self._debug_enabled = False
         self._last_vocab_sync_mod: Optional[int] = None
         self._last_vocab_sync_count: Optional[int] = None
+        self._last_kanji_sync_mod: Optional[int] = None
+        self._last_kanji_sync_count: Optional[int] = None
         self._pending_vocab_sync_marker: Optional[Tuple[int, int]] = None
+        self._pending_kanji_sync_marker: Optional[Tuple[int, int]] = None
         self._last_synced_config_hash: Optional[str] = None
         self._pending_config_hash: Optional[str] = None
         self._recalc_action = None
@@ -344,6 +347,8 @@ class KanjiVocabRecalcManager:
 
         self._last_vocab_sync_mod = _coerce_int(payload.get("last_vocab_sync_mod"))
         self._last_vocab_sync_count = _coerce_int(payload.get("last_vocab_sync_count"))
+        self._last_kanji_sync_mod = _coerce_int(payload.get("last_kanji_sync_mod"))
+        self._last_kanji_sync_count = _coerce_int(payload.get("last_kanji_sync_count"))
         config_hash = payload.get("last_config_hash")
         if isinstance(config_hash, str) and config_hash:
             self._last_synced_config_hash = config_hash
@@ -353,7 +358,13 @@ class KanjiVocabRecalcManager:
     def _extract_legacy_profile_state(self, data: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
         legacy_state: Dict[str, Any] = {}
         removed = False
-        for key in ("last_vocab_sync_mod", "last_vocab_sync_count", "last_config_hash"):
+        for key in (
+            "last_vocab_sync_mod",
+            "last_vocab_sync_count",
+            "last_kanji_sync_mod",
+            "last_kanji_sync_count",
+            "last_config_hash",
+        ):
             if key in data:
                 legacy_state[key] = data.pop(key)
                 removed = True
@@ -385,6 +396,10 @@ class KanjiVocabRecalcManager:
             state_payload["last_vocab_sync_mod"] = int(self._last_vocab_sync_mod)
         if self._last_vocab_sync_count is not None:
             state_payload["last_vocab_sync_count"] = int(self._last_vocab_sync_count)
+        if self._last_kanji_sync_mod is not None:
+            state_payload["last_kanji_sync_mod"] = int(self._last_kanji_sync_mod)
+        if self._last_kanji_sync_count is not None:
+            state_payload["last_kanji_sync_count"] = int(self._last_kanji_sync_count)
         if self._last_synced_config_hash:
             state_payload["last_config_hash"] = self._last_synced_config_hash
         if not state_payload:
@@ -935,6 +950,13 @@ class KanjiVocabRecalcManager:
             self._prioritysieve_waiting_post_sync = False
             self.run_after_sync()
 
+    def _run_after_prioritysieve_timeout(self) -> None:
+        if not getattr(self, "_prioritysieve_waiting_post_sync", False):
+            return
+        self._debug("sync/priority_timeout")
+        self._prioritysieve_waiting_post_sync = False
+        self.run_after_sync()
+
     def _on_top_toolbar_init_links(self, links: List[str], toolbar: Toolbar) -> None:
         ps_available = self._prioritysieve_recalc_main() is not None
         for index in range(len(links) - 1, -1, -1):
@@ -982,6 +1004,7 @@ class KanjiVocabRecalcManager:
             stats = self._recalc_internal(progress_tracker=progress_tracker, cfg=cfg)
         except Exception as err:  # noqa: BLE001
             self._pending_vocab_sync_marker = None
+            self._pending_kanji_sync_marker = None
             self._pending_config_hash = None
             self.mw.progress.finish()
             self._finalize_recalc_undo(collection, undo_target)
@@ -1234,6 +1257,8 @@ class KanjiVocabRecalcManager:
 
         marker_count, marker_mod = self._compute_vocab_sync_marker(collection, vocab_models)
         self._pending_vocab_sync_marker = (marker_count, marker_mod)
+        kanji_marker_count, kanji_marker_mod = self._compute_kanji_review_marker(collection, kanji_model)
+        self._pending_kanji_sync_marker = (kanji_marker_count, kanji_marker_mod)
 
         return stats
 
@@ -1286,17 +1311,85 @@ class KanjiVocabRecalcManager:
             return True
         return False
 
+    def _compute_kanji_review_marker(
+        self,
+        collection: Collection,
+        kanji_model: NotetypeDict,
+    ) -> Tuple[int, int]:
+        model_id = kanji_model.get("id")
+        if not isinstance(model_id, int):
+            return 0, 0
+        try:
+            rows = _db_all(
+                collection,
+                """
+                SELECT COUNT(*), MAX(r.id)
+                FROM revlog r
+                JOIN cards c ON r.cid = c.id
+                JOIN notes n ON c.nid = n.id
+                WHERE n.mid = ?
+                """.strip(),
+                model_id,
+                context="compute_kanji_review_marker",
+            )
+        except Exception:
+            return 0, 0
+        if not rows:
+            return 0, 0
+        count_raw, max_revlog_raw = rows[0]
+        try:
+            count = int(count_raw or 0)
+        except Exception:
+            count = 0
+        try:
+            max_revlog = int(max_revlog_raw or 0)
+        except Exception:
+            max_revlog = 0
+        return count, max_revlog
+
+    def _have_kanji_reviews_changed(self, collection: Collection, cfg: AddonConfig) -> bool:
+        if self._last_kanji_sync_mod is None or self._last_kanji_sync_count is None:
+            self._debug(
+                "sync/kanji_marker_missing",
+                last_count=self._last_kanji_sync_count,
+                last_max=self._last_kanji_sync_mod,
+            )
+            return True
+        try:
+            kanji_model, _, _ = self._get_kanji_model_context(collection, cfg)
+        except Exception:
+            self._debug("sync/kanji_model_unavailable")
+            return True
+        count, max_mod = self._compute_kanji_review_marker(collection, kanji_model)
+        self._debug(
+            "sync/kanji_marker_check",
+            last_count=self._last_kanji_sync_count,
+            last_max=self._last_kanji_sync_mod,
+            new_count=count,
+            new_max=max_mod,
+        )
+        if count != self._last_kanji_sync_count:
+            return True
+        if max_mod > self._last_kanji_sync_mod:
+            return True
+        return False
+
     def _commit_vocab_sync_marker(self, cfg: AddonConfig) -> None:
         if self._pending_vocab_sync_marker is not None:
             count, max_mod = self._pending_vocab_sync_marker
             self._last_vocab_sync_count = int(count)
             self._last_vocab_sync_mod = int(max_mod)
+        if self._pending_kanji_sync_marker is not None:
+            count, max_mod = self._pending_kanji_sync_marker
+            self._last_kanji_sync_count = int(count)
+            self._last_kanji_sync_mod = int(max_mod)
         if self._pending_config_hash is not None:
             self._last_synced_config_hash = self._pending_config_hash
         self._pending_config_hash = None
         raw = self._serialize_config(cfg)
         self._write_profile_config(raw)
         self._pending_vocab_sync_marker = None
+        self._pending_kanji_sync_marker = None
 
     def _on_reviewer_did_show_question(self, card: Any, *args: Any, **kwargs: Any) -> None:
         if not card:
@@ -1639,8 +1732,17 @@ class KanjiVocabRecalcManager:
         return False
 
     def _on_sync_event(self, *args: Any, **kwargs: Any) -> None:
+        self._debug(
+            "sync/event",
+            priority_waiting=getattr(self, "_prioritysieve_waiting_post_sync", False),
+            suppress=self._suppress_next_auto_sync,
+            target=self._sync_hook_target,
+        )
         if self._prioritysieve_post_sync_active():
             self._prioritysieve_waiting_post_sync = True
+            timeout_ms = 30000
+            self._debug("sync/priority_wait", timeout_ms=timeout_ms)
+            self._call_later(self._run_after_prioritysieve_timeout, timeout_ms)
             return
         self._prioritysieve_waiting_post_sync = False
         self.run_after_sync()
@@ -1660,9 +1762,11 @@ class KanjiVocabRecalcManager:
 
         cfg = self.load_config()
         if not cfg.auto_run_on_sync:
+            self._debug("sync/auto_run_disabled")
             callback(False)
             return
         if not self.mw or not self.mw.col:
+            self._debug("sync/no_collection")
             callback(False)
             return
 
@@ -1670,9 +1774,42 @@ class KanjiVocabRecalcManager:
         config_hash = self._hash_config(cfg)
         config_changed = self._last_synced_config_hash != config_hash
         vocab_changed = False
+        kanji_changed = False
         if not config_changed:
             vocab_changed = self._have_vocab_notes_changed(collection, cfg)
-        if not config_changed and not vocab_changed:
+            if not vocab_changed:
+                kanji_changed = self._have_kanji_reviews_changed(collection, cfg)
+        current_kanji_count = None
+        current_kanji_max = None
+        current_vocab_count = None
+        current_vocab_max = None
+        if self.mw and self.mw.col:
+            try:
+                if cfg.vocab_note_types:
+                    vocab_models = self._resolve_vocab_models(collection, cfg)
+                    current_vocab_count, current_vocab_max = self._compute_vocab_sync_marker(collection, vocab_models)
+            except Exception:
+                pass
+            try:
+                kanji_model, _, _ = self._get_kanji_model_context(collection, cfg)
+                current_kanji_count, current_kanji_max = self._compute_kanji_review_marker(collection, kanji_model)
+            except Exception:
+                pass
+        self._debug(
+            "sync/run_after_sync_decision",
+            config_changed=config_changed,
+            vocab_changed=vocab_changed,
+            kanji_changed=kanji_changed,
+            last_vocab_count=self._last_vocab_sync_count,
+            last_vocab_max=self._last_vocab_sync_mod,
+            current_vocab_count=current_vocab_count,
+            current_vocab_max=current_vocab_max,
+            last_kanji_count=self._last_kanji_sync_count,
+            last_kanji_max=self._last_kanji_sync_mod,
+            current_kanji_count=current_kanji_count,
+            current_kanji_max=current_kanji_max,
+        )
+        if not config_changed and not vocab_changed and not kanji_changed:
             callback(False)
             return
 
@@ -1683,6 +1820,12 @@ class KanjiVocabRecalcManager:
             self._realtime_error_logged = False
             stats = self.run_recalc()
             changed = bool(stats and self._stats_warrant_sync(stats))
+            self._debug(
+                "sync/run_after_sync_result",
+                stats=stats,
+                changed=changed,
+                allow_followup=allow_followup,
+            )
             if changed and allow_followup:
 
                 def followup() -> None:

@@ -381,7 +381,10 @@ def manager_with_profile(kanjicards_module, tmp_path):
     manager._sync_hook_target = None
     manager._last_vocab_sync_mod = None
     manager._last_vocab_sync_count = None
+    manager._last_kanji_sync_mod = None
+    manager._last_kanji_sync_count = None
     manager._pending_vocab_sync_marker = None
+    manager._pending_kanji_sync_marker = None
     manager._last_synced_config_hash = None
     manager._pending_config_hash = None
     manager._suppress_next_auto_sync = False

@@ -384,6 +384,8 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
         manager_with_profile._merge_recalc_undo_step(mw.col)
         mw.col.add_step("card reorder")
         manager_with_profile._merge_recalc_undo_step(mw.col)
+        manager_with_profile._pending_vocab_sync_marker = (5, 100)
+        manager_with_profile._pending_kanji_sync_marker = (8, 200)
         return {"created": 1}
 
     manager_with_profile._recalc_internal = fake_recalc  # type: ignore[assignment]
@@ -407,6 +409,8 @@ def test_run_recalc_success_and_failure(manager_with_profile, kanjicards_module,
     def failing_recalc(**kwargs):
         mw.col.add_step("partial update")
         manager_with_profile._merge_recalc_undo_step(mw.col)
+        manager_with_profile._pending_vocab_sync_marker = (0, 0)
+        manager_with_profile._pending_kanji_sync_marker = (0, 0)
         raise RuntimeError("boom")
 
     manager_with_profile._recalc_internal = failing_recalc  # type: ignore[assignment]
@@ -435,6 +439,7 @@ def test_on_sync_event_handles_busy_and_followup(manager_with_profile, kanjicard
     manager_with_profile.run_recalc = lambda: {"created": 1}  # type: ignore[assignment]
     manager_with_profile._trigger_followup_sync = lambda: True  # type: ignore[assignment]
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: True  # type: ignore[assignment]
+    manager_with_profile._have_kanji_reviews_changed = lambda collection, cfg: False  # type: ignore[assignment]
     mw.col = object()
     mw.progress.busy_values = [True, False]
 
@@ -517,6 +522,21 @@ def test_handle_prioritysieve_recalc_completed_noop_without_flag(manager_with_pr
     assert calls == []
 
 
+def test_prioritysieve_timeout_runs_when_waiting(manager_with_profile):
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_run_after_sync(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    manager_with_profile.run_after_sync = fake_run_after_sync  # type: ignore[assignment]
+    manager_with_profile._prioritysieve_waiting_post_sync = True
+
+    manager_with_profile._run_after_prioritysieve_timeout()
+
+    assert len(calls) == 1
+    assert manager_with_profile._prioritysieve_waiting_post_sync is False
+
+
 def test_run_after_sync_without_followup(manager_with_profile, kanjicards_module, tmp_path):
     mw = FakeMainWindow(tmp_path)
     manager_with_profile.mw = mw
@@ -574,10 +594,12 @@ def test_on_sync_event_runs_when_config_changed(manager_with_profile, kanjicards
     manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
     manager_with_profile._stats_warrant_sync = lambda stats: False  # type: ignore[assignment]
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    manager_with_profile._have_kanji_reviews_changed = lambda collection, cfg: False  # type: ignore[assignment]
     run_calls = []
 
     def fake_recalc_internal(**kwargs):
         manager_with_profile._pending_vocab_sync_marker = (0, 0)
+        manager_with_profile._pending_kanji_sync_marker = (0, 0)
         current_cfg = kwargs.get("cfg", cfg)
         manager_with_profile._pending_config_hash = manager_with_profile._hash_config(current_cfg)
         run_calls.append(True)
@@ -614,6 +636,7 @@ def test_on_sync_event_skips_when_no_vocab_changes(manager_with_profile, tmp_pat
     )
     manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    manager_with_profile._have_kanji_reviews_changed = lambda collection, cfg: False  # type: ignore[assignment]
     called = {}
 
     def fail_run_recalc():
@@ -625,3 +648,34 @@ def test_on_sync_event_skips_when_no_vocab_changes(manager_with_profile, tmp_pat
     mw.col = types.SimpleNamespace()
     manager_with_profile._on_sync_event()
     assert "run" not in called
+
+
+def test_on_sync_event_runs_when_kanji_reviews_changed(manager_with_profile, tmp_path):
+    mw = FakeMainWindow(tmp_path)
+    manager_with_profile.mw = mw
+    cfg = manager_with_profile._config_from_raw(
+        {
+            "kanji_note_type": {"name": "Kanji", "fields": {}},
+            "vocab_note_types": [],
+            "auto_run_on_sync": True,
+        }
+    )
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
+    manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    manager_with_profile._have_kanji_reviews_changed = lambda collection, cfg: True  # type: ignore[assignment]
+    manager_with_profile._stats_warrant_sync = lambda stats: False  # type: ignore[assignment]
+    manager_with_profile._trigger_followup_sync = lambda: False  # type: ignore[assignment]
+    called = {}
+
+    def fake_run_recalc():
+        called["run"] = True
+        manager_with_profile._pending_vocab_sync_marker = (0, 0)
+        manager_with_profile._pending_kanji_sync_marker = (0, 0)
+        return {"created": 0}
+
+    manager_with_profile.run_recalc = fake_run_recalc  # type: ignore[assignment]
+    manager_with_profile._last_synced_config_hash = manager_with_profile._hash_config(cfg)
+    mw.col = types.SimpleNamespace()
+    manager_with_profile._on_sync_event()
+
+    assert "run" in called

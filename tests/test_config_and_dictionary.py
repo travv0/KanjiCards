@@ -291,15 +291,21 @@ def test_write_profile_config_separates_state(manager_with_profile):
         state_path.unlink()
     manager_with_profile._last_vocab_sync_mod = 111
     manager_with_profile._last_vocab_sync_count = 7
+    manager_with_profile._last_kanji_sync_mod = 42
+    manager_with_profile._last_kanji_sync_count = 3
     manager_with_profile._last_synced_config_hash = "hash"
     manager_with_profile._write_profile_config({"value": 9})
     config_data = json.loads(config_path.read_text(encoding="utf-8"))
     assert "last_vocab_sync_mod" not in config_data
     assert "last_vocab_sync_count" not in config_data
+    assert "last_kanji_sync_mod" not in config_data
+    assert "last_kanji_sync_count" not in config_data
     assert "last_config_hash" not in config_data
     state_data = json.loads(state_path.read_text(encoding="utf-8"))
     assert state_data["last_vocab_sync_mod"] == 111
     assert state_data["last_vocab_sync_count"] == 7
+    assert state_data["last_kanji_sync_mod"] == 42
+    assert state_data["last_kanji_sync_count"] == 3
     assert state_data["last_config_hash"] == "hash"
 
 
@@ -311,6 +317,8 @@ def test_load_profile_config_migrates_legacy_state(manager_with_profile):
         "value": 5,
         "last_vocab_sync_mod": 222,
         "last_vocab_sync_count": "12",
+        "last_kanji_sync_mod": 333,
+        "last_kanji_sync_count": "4",
         "last_config_hash": "legacy",
     }
     config_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
@@ -320,14 +328,20 @@ def test_load_profile_config_migrates_legacy_state(manager_with_profile):
     assert data == {"value": 5}
     assert manager_with_profile._last_vocab_sync_mod == 222
     assert manager_with_profile._last_vocab_sync_count == 12
+    assert manager_with_profile._last_kanji_sync_mod == 333
+    assert manager_with_profile._last_kanji_sync_count == 4
     assert manager_with_profile._last_synced_config_hash == "legacy"
     state_data = json.loads(state_path.read_text(encoding="utf-8"))
     assert state_data["last_vocab_sync_mod"] == 222
     assert state_data["last_vocab_sync_count"] == 12
+    assert state_data["last_kanji_sync_mod"] == 333
+    assert state_data["last_kanji_sync_count"] == 4
     assert state_data["last_config_hash"] == "legacy"
     rewritten_config = json.loads(config_path.read_text(encoding="utf-8"))
     assert "last_vocab_sync_mod" not in rewritten_config
     assert "last_vocab_sync_count" not in rewritten_config
+    assert "last_kanji_sync_mod" not in rewritten_config
+    assert "last_kanji_sync_count" not in rewritten_config
     assert "last_config_hash" not in rewritten_config
 
 
