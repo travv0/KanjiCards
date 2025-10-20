@@ -546,7 +546,7 @@ class KanjiVocabRecalcManager:
 
         bucket_tags = self._normalize_bucket_tags(raw.get("bucket_tags"))
 
-        interval_raw = raw.get("known_kanji_interval", 21)
+        interval_raw = raw.get("known_kanji_interval", 7)
         try:
             interval_value = int(interval_raw)
         except Exception:
