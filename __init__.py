@@ -1467,12 +1467,16 @@ class KanjiVocabRecalcManager:
             queue=getattr(card, "queue", None),
             type=getattr(card, "type", None),
         )
-        try:
-            self._process_reviewed_card(card)
-        except Exception as err:  # noqa: BLE001
-            if not self._realtime_error_logged:
-                _safe_print(f"[KanjiCards] realtime recalc error: {err}")
-                self._realtime_error_logged = True
+
+        def _run() -> None:
+            try:
+                self._process_reviewed_card(card)
+            except Exception as err:  # noqa: BLE001
+                if not self._realtime_error_logged:
+                    _safe_print(f"[KanjiCards] realtime recalc error: {err}")
+                    self._realtime_error_logged = True
+
+        self._call_later(_run, delay_ms=1)
 
     def _process_reviewed_card(self, card: Any) -> None:
         collection = self.mw.col

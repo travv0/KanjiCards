@@ -423,11 +423,68 @@ def test_on_reviewer_did_answer_card_logs_errors(manager, monkeypatch):
         called["count"] = called.get("count", 0) + 1
         raise RuntimeError("boom")
 
+    manager._call_later = lambda callback, delay_ms=0: callback()
     manager._process_reviewed_card = failing_process  # type: ignore[assignment]
     card = types.SimpleNamespace(id=5, queue=0, type=0)
     manager._on_reviewer_did_answer_card(card)
     assert called["count"] == 1
     assert manager._realtime_error_logged is True
+
+
+def test_on_reviewer_did_answer_card_waits_for_review_undo(manager, kanjicards_module, monkeypatch):
+    cfg = make_config(kanjicards_module)
+    manager.load_config = lambda: cfg
+
+    kanji_model = {"id": 10, "name": "Kanji", "flds": [{"name": "Character"}]}
+    monkeypatch.setattr(
+        manager,
+        "_get_kanji_model_context",
+        lambda *args, **kwargs: (kanji_model, {"kanji": 0}, 0),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_vocab_model_map",
+        lambda *args, **kwargs: {1: ({"id": 1}, [0], 1.0)},
+    )
+    monkeypatch.setattr(
+        manager,
+        "_get_existing_kanji_notes",
+        lambda *args, **kwargs: {"火": 1},
+    )
+
+    class StaleUndoCollection:
+        def __init__(self):
+            self.last_step = 100
+            self.merged = []
+
+        def undo_status(self):
+            return types.SimpleNamespace(last_step=self.last_step)
+
+        def merge_undo_entries(self, target):
+            self.merged.append(target)
+
+    collection = StaleUndoCollection()
+    manager.mw.col = collection
+
+    def fake_update(*args, **kwargs):
+        return {"vocab_unsuspended": 1, "vocab_suspended": 0, "notes_updated": 0}
+
+    monkeypatch.setattr(manager, "_update_vocab_suspension", fake_update)
+
+    note = FakeNote(mid=10, fields=["火"], note_id=5)
+    card = FakeCard(777, note)
+    manager._pre_answer_card_state[777] = {"type": 0, "queue": 0, "note_id": 5}
+    manager._last_question_card_id = 777
+
+    def fake_call_later(callback, delay_ms=0):
+        collection.last_step = 101
+        callback()
+
+    manager._call_later = fake_call_later
+
+    manager._on_reviewer_did_answer_card(card)
+
+    assert collection.merged == [101]
 
 
 def test_process_reviewed_card_respects_realtime_flag(manager, kanjicards_module):
