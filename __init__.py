@@ -244,6 +244,10 @@ class KanjiIntervalStatus:
 class KanjiVocabRecalcManager:
     """Core coordinator for the KanjiCards add-on."""
 
+    _REALTIME_INITIAL_DELAY_MS = 0
+    _REALTIME_RETRY_DELAY_MS = 5
+    _REALTIME_MAX_ATTEMPTS = 60
+
     def __init__(self) -> None:
         if not mw:
             raise RuntimeError("KanjiCards requires Anki main window")
@@ -1467,8 +1471,41 @@ class KanjiVocabRecalcManager:
             queue=getattr(card, "queue", None),
             type=getattr(card, "type", None),
         )
+        collection = self.mw.col
+        previous_step: Optional[int] = None
+        if collection is not None:
+            try:
+                previous_step = self._get_last_undo_step(collection)
+            except Exception:
+                previous_step = None
+        self._schedule_realtime_review(card, previous_step, attempt=0)
 
+    def _schedule_realtime_review(
+        self,
+        card: Any,
+        previous_step: Optional[int],
+        *,
+        attempt: int,
+    ) -> None:
         def _run() -> None:
+            collection = self.mw.col
+            if collection is None:
+                return
+            current_step: Optional[int]
+            try:
+                current_step = self._get_last_undo_step(collection)
+            except Exception:
+                current_step = None
+            if (
+                current_step is None
+                or current_step == previous_step
+            ) and attempt < self._REALTIME_MAX_ATTEMPTS:
+                self._schedule_realtime_review(
+                    card,
+                    previous_step,
+                    attempt=attempt + 1,
+                )
+                return
             try:
                 self._process_reviewed_card(card)
             except Exception as err:  # noqa: BLE001
@@ -1476,7 +1513,8 @@ class KanjiVocabRecalcManager:
                     _safe_print(f"[KanjiCards] realtime recalc error: {err}")
                     self._realtime_error_logged = True
 
-        self._call_later(_run, delay_ms=1)
+        delay_ms = self._REALTIME_INITIAL_DELAY_MS if attempt == 0 else self._REALTIME_RETRY_DELAY_MS
+        self._call_later(_run, delay_ms=delay_ms)
 
     def _process_reviewed_card(self, card: Any) -> None:
         collection = self.mw.col
