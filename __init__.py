@@ -972,11 +972,20 @@ class KanjiVocabRecalcManager:
             return True, "vocab_check_failed"
         if vocab_changed:
             return True, "vocab_changed"
+        kanji_changed = False
+        try:
+            kanji_changed = self._have_kanji_reviews_changed(collection, cfg)
+        except Exception:
+            return True, "kanji_check_failed"
         ps_wait, ps_reason = self._prioritysieve_state_requires_wait()
         if ps_wait is None:
             return True, ps_reason
         if ps_wait:
             return True, ps_reason
+        if kanji_changed:
+            return False, "kanji_only_changes"
+        if ps_reason == "prioritysieve_states_equal":
+            return False, "prioritysieve_idle"
         return False, ps_reason
 
     def _prioritysieve_state_requires_wait(self) -> Tuple[Optional[bool], str]:
@@ -1887,7 +1896,7 @@ class KanjiVocabRecalcManager:
                 self._call_later(self._run_after_prioritysieve_timeout, timeout_ms)
                 return
             self._debug("sync/priority_skip_wait", reason=reason)
-            if self._prioritysieve_trigger_sequential_recalc(reason):
+            if reason == "kanji_only_changes" and self._prioritysieve_trigger_sequential_recalc(reason):
                 return
         self._prioritysieve_waiting_post_sync = False
         self.run_after_sync()

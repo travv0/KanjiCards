@@ -488,6 +488,7 @@ def test_on_sync_event_runs_immediately_for_kanji_only_changes(manager_with_prof
     manager_with_profile.mw.col = object()  # type: ignore[attr-defined]
     manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    manager_with_profile._have_kanji_reviews_changed = lambda collection, cfg: True  # type: ignore[assignment]
     manager_with_profile._last_synced_config_hash = manager_with_profile._hash_config(cfg)
     monkeypatch.setattr(manager_with_profile, "_prioritysieve_post_sync_active", lambda: True)
     monkeypatch.setattr(
@@ -503,7 +504,42 @@ def test_on_sync_event_runs_immediately_for_kanji_only_changes(manager_with_prof
 
     manager_with_profile._on_sync_event()
 
-    assert followup_calls.get("reason") == "prioritysieve_states_equal"
+    assert followup_calls.get("reason") == "kanji_only_changes"
+
+
+def test_on_sync_event_skips_sequential_when_idle(manager_with_profile, monkeypatch):
+    calls = {}
+
+    def record_run(*args, **kwargs):
+        calls["run"] = (args, kwargs)
+
+    manager_with_profile.run_after_sync = record_run  # type: ignore[assignment]
+    manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    manager_with_profile._have_kanji_reviews_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    cfg = manager_with_profile._config_from_raw(
+        {
+            "kanji_note_type": {"name": "Kanji", "fields": {"kanji": "Character"}},
+            "vocab_note_types": [],
+        }
+    )
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
+    manager_with_profile._last_synced_config_hash = manager_with_profile._hash_config(cfg)
+    manager_with_profile.mw.col = object()  # type: ignore[attr-defined]
+    monkeypatch.setattr(manager_with_profile, "_prioritysieve_post_sync_active", lambda: True)
+    monkeypatch.setattr(
+        manager_with_profile,
+        "_prioritysieve_state_requires_wait",
+        lambda: (False, "prioritysieve_states_equal"),
+    )
+
+    def fail_trigger(reason: str) -> bool:
+        raise AssertionError("sequential trigger unexpected")
+
+    monkeypatch.setattr(manager_with_profile, "_prioritysieve_trigger_sequential_recalc", fail_trigger)
+
+    manager_with_profile._on_sync_event()
+
+    assert calls.get("run") is not None
 
 
 def test_prioritysieve_post_sync_active_reads_config(manager_with_profile, monkeypatch):
