@@ -949,6 +949,84 @@ class KanjiVocabRecalcManager:
             return normalized_setting in {"true", "1", "yes", "on"}
         return bool(setting_value)
 
+    def _prioritysieve_should_wait_post_sync(self) -> Tuple[bool, str]:
+        mw_obj = getattr(self, "mw", None)
+        if mw_obj is None:
+            return True, "missing_main_window"
+        collection = getattr(mw_obj, "col", None)
+        if collection is None:
+            return True, "missing_collection"
+        try:
+            cfg = self.load_config()
+        except Exception:
+            return True, "config_load_failed"
+        try:
+            config_hash = self._hash_config(cfg)
+        except Exception:
+            return True, "config_hash_failed"
+        if self._last_synced_config_hash != config_hash:
+            return True, "config_changed"
+        try:
+            vocab_changed = self._have_vocab_notes_changed(collection, cfg)
+        except Exception:
+            return True, "vocab_check_failed"
+        if vocab_changed:
+            return True, "vocab_changed"
+        ps_wait, ps_reason = self._prioritysieve_state_requires_wait()
+        if ps_wait is None:
+            return True, ps_reason
+        if ps_wait:
+            return True, ps_reason
+        return False, ps_reason
+
+    def _prioritysieve_state_requires_wait(self) -> Tuple[Optional[bool], str]:
+        try:
+            ps_module = sys.modules.get("prioritysieve")
+            if ps_module is None:
+                ps_module = __import__("prioritysieve")
+        except Exception:
+            return None, "prioritysieve_import_failed"
+        pending_raw = getattr(ps_module, "_pending_changes_before_sync", None)
+        if isinstance(pending_raw, bool):
+            pending_changes = pending_raw
+        else:
+            pending_changes = True
+        baseline_state: Optional[str] = getattr(ps_module, "_state_before_sync_recalc", None)
+        if baseline_state is None:
+            try:
+                extras_module = __import__(
+                    "prioritysieve.extra_settings.prioritysieve_extra_settings",
+                    fromlist=["PrioritySieveExtraSettings"],
+                )
+                extra_cls = getattr(extras_module, "PrioritySieveExtraSettings", None)
+                if extra_cls is not None:
+                    extras = extra_cls()
+                    baseline_state = extras.get_recalc_collection_state()
+            except Exception:
+                pass
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main is None:
+            return None, "prioritysieve_main_missing"
+        compute_state = getattr(ps_main, "compute_modify_filters_state", None)
+        if not callable(compute_state):
+            return None, "prioritysieve_state_function_missing"
+        try:
+            post_state = compute_state()
+            post_state_json = json.dumps(post_state, sort_keys=True)
+        except Exception:
+            return None, "prioritysieve_state_snapshot_failed"
+        if pending_changes:
+            if baseline_state is None:
+                return True, "prioritysieve_pending_no_baseline"
+            if baseline_state == post_state_json:
+                return True, "prioritysieve_pending_equal_state"
+            return True, "prioritysieve_pending_changes"
+        if baseline_state is None:
+            return False, "prioritysieve_missing_baseline"
+        if baseline_state == post_state_json:
+            return False, "prioritysieve_states_equal"
+        return True, "prioritysieve_state_changed"
+
     def _handle_prioritysieve_recalc_completed(self) -> None:
         if getattr(self, "_prioritysieve_waiting_post_sync", False):
             self._prioritysieve_waiting_post_sync = False
@@ -1781,11 +1859,14 @@ class KanjiVocabRecalcManager:
             target=self._sync_hook_target,
         )
         if self._prioritysieve_post_sync_active():
-            self._prioritysieve_waiting_post_sync = True
-            timeout_ms = 30000
-            self._debug("sync/priority_wait", timeout_ms=timeout_ms)
-            self._call_later(self._run_after_prioritysieve_timeout, timeout_ms)
-            return
+            should_wait, reason = self._prioritysieve_should_wait_post_sync()
+            if should_wait:
+                self._prioritysieve_waiting_post_sync = True
+                timeout_ms = 30000
+                self._debug("sync/priority_wait", timeout_ms=timeout_ms, reason=reason)
+                self._call_later(self._run_after_prioritysieve_timeout, timeout_ms)
+                return
+            self._debug("sync/priority_skip_wait", reason=reason)
         self._prioritysieve_waiting_post_sync = False
         self.run_after_sync()
 

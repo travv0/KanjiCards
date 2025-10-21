@@ -472,6 +472,36 @@ def test_on_sync_event_skips_when_prioritysieve_enabled(manager_with_profile, mo
     assert manager_with_profile._prioritysieve_waiting_post_sync is True
 
 
+def test_on_sync_event_runs_immediately_for_kanji_only_changes(manager_with_profile, monkeypatch):
+    calls = {}
+
+    def fake_run_after_sync(*args, **kwargs):
+        calls["called"] = True
+
+    cfg = manager_with_profile._config_from_raw(
+        {
+            "kanji_note_type": {"name": "Kanji", "fields": {"kanji": "Character"}},
+            "vocab_note_types": [],
+        }
+    )
+    manager_with_profile.run_after_sync = fake_run_after_sync  # type: ignore[assignment]
+    manager_with_profile.mw.col = object()  # type: ignore[attr-defined]
+    manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
+    manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
+    manager_with_profile._last_synced_config_hash = manager_with_profile._hash_config(cfg)
+    monkeypatch.setattr(manager_with_profile, "_prioritysieve_post_sync_active", lambda: True)
+    monkeypatch.setattr(
+        manager_with_profile,
+        "_prioritysieve_state_requires_wait",
+        lambda: (False, "prioritysieve_states_equal"),
+    )
+
+    manager_with_profile._on_sync_event()
+
+    assert calls.get("called") is True
+    assert manager_with_profile._prioritysieve_waiting_post_sync is False
+
+
 def test_prioritysieve_post_sync_active_reads_config(manager_with_profile, monkeypatch):
     monkeypatch.setattr(manager_with_profile, "_prioritysieve_recalc_main", lambda: object())
     addon_manager = manager_with_profile.mw.addonManager
