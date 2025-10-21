@@ -473,10 +473,7 @@ def test_on_sync_event_skips_when_prioritysieve_enabled(manager_with_profile, mo
 
 
 def test_on_sync_event_runs_immediately_for_kanji_only_changes(manager_with_profile, monkeypatch):
-    calls = {}
-
-    def fake_run_after_sync(*args, **kwargs):
-        calls["called"] = True
+    followup_calls = {}
 
     cfg = manager_with_profile._config_from_raw(
         {
@@ -484,7 +481,10 @@ def test_on_sync_event_runs_immediately_for_kanji_only_changes(manager_with_prof
             "vocab_note_types": [],
         }
     )
-    manager_with_profile.run_after_sync = fake_run_after_sync  # type: ignore[assignment]
+    def fail_run_after_sync(*args, **kwargs):
+        raise AssertionError("run_after_sync should not be called directly")
+
+    manager_with_profile.run_after_sync = fail_run_after_sync  # type: ignore[assignment]
     manager_with_profile.mw.col = object()  # type: ignore[attr-defined]
     manager_with_profile.load_config = lambda: cfg  # type: ignore[assignment]
     manager_with_profile._have_vocab_notes_changed = lambda collection, cfg: False  # type: ignore[assignment]
@@ -495,11 +495,15 @@ def test_on_sync_event_runs_immediately_for_kanji_only_changes(manager_with_prof
         "_prioritysieve_state_requires_wait",
         lambda: (False, "prioritysieve_states_equal"),
     )
+    monkeypatch.setattr(
+        manager_with_profile,
+        "_prioritysieve_trigger_sequential_recalc",
+        lambda reason: followup_calls.setdefault("reason", reason) or True,
+    )
 
     manager_with_profile._on_sync_event()
 
-    assert calls.get("called") is True
-    assert manager_with_profile._prioritysieve_waiting_post_sync is False
+    assert followup_calls.get("reason") == "prioritysieve_states_equal"
 
 
 def test_prioritysieve_post_sync_active_reads_config(manager_with_profile, monkeypatch):
@@ -521,6 +525,27 @@ def test_prioritysieve_post_sync_active_reads_config(manager_with_profile, monke
 
     monkeypatch.setattr(addon_manager, "getConfig", config_without_post_sync)
     assert manager_with_profile._prioritysieve_post_sync_active() is False
+
+
+def test_prioritysieve_trigger_sequential_recalc_runs(manager_with_profile, monkeypatch):
+    ps_called = {}
+
+    class FakePS:
+        def recalc(self):
+            ps_called["ran"] = True
+
+    monkeypatch.setattr(manager_with_profile, "_prioritysieve_recalc_main", lambda: FakePS())
+    monkeypatch.setattr(manager_with_profile, "_run_on_main", lambda cb: cb())
+
+    assert manager_with_profile._prioritysieve_trigger_sequential_recalc("kanji_only") is True
+    assert ps_called == {"ran": True}
+    assert manager_with_profile._prioritysieve_waiting_post_sync is True
+    manager_with_profile._prioritysieve_waiting_post_sync = False
+
+
+def test_prioritysieve_trigger_sequential_recalc_handles_missing_module(manager_with_profile):
+    manager_with_profile._prioritysieve_waiting_post_sync = False
+    assert manager_with_profile._prioritysieve_trigger_sequential_recalc("kanji_only") is False
 
 
 def test_handle_prioritysieve_recalc_completed_runs_when_pending(manager_with_profile):

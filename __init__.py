@@ -1027,6 +1027,26 @@ class KanjiVocabRecalcManager:
             return False, "prioritysieve_states_equal"
         return True, "prioritysieve_state_changed"
 
+    def _prioritysieve_trigger_sequential_recalc(self, reason: str) -> bool:
+        ps_main = self._prioritysieve_recalc_main()
+        if ps_main is None:
+            self._debug("sync/priority_sequential_missing", reason=reason)
+            return False
+
+        def _invoke() -> None:
+            ps_main.recalc()
+
+        original_waiting = getattr(self, "_prioritysieve_waiting_post_sync", False)
+        self._prioritysieve_waiting_post_sync = True
+        try:
+            self._debug("sync/priority_sequential_start", reason=reason)
+            self._run_on_main(_invoke)
+        except Exception as err:  # noqa: BLE001
+            self._prioritysieve_waiting_post_sync = original_waiting
+            self._debug("sync/priority_sequential_error", reason=reason, error=str(err))
+            return False
+        return True
+
     def _handle_prioritysieve_recalc_completed(self) -> None:
         if getattr(self, "_prioritysieve_waiting_post_sync", False):
             self._prioritysieve_waiting_post_sync = False
@@ -1867,6 +1887,8 @@ class KanjiVocabRecalcManager:
                 self._call_later(self._run_after_prioritysieve_timeout, timeout_ms)
                 return
             self._debug("sync/priority_skip_wait", reason=reason)
+            if self._prioritysieve_trigger_sequential_recalc(reason):
+                return
         self._prioritysieve_waiting_post_sync = False
         self.run_after_sync()
 
