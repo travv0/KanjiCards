@@ -18,3 +18,5 @@ Pytest is the single source of truth. Place new unit tests under `tests/` using 
 
 ## Commit & Pull Request Guidelines
 Follow the existing history: short, imperative commit subjects (e.g., “Skip post-sync kanji updates when vocab unchanged”) with optional body paragraphs describing rationale and follow-up work. Squash commits that only fix review feedback. Pull requests need: a concise summary of the user-facing change, links to any tracked issues, a note on configuration migrations, and explicit confirmation of the test commands you executed. Include screenshots or GIFs when Qt surfaces shift so reviewers can verify UI implications quickly.
+
+**Never amend pushed commits.** Before running `git commit --amend`, confirm the commit is strictly local (`git status -sb` and `git log origin/main..HEAD`). If the commit already exists on the remote, create a new follow-up commit instead. Rewriting published history breaks collaborators’ clones and the automation that deploys the add-on, so always append changes when in doubt.
