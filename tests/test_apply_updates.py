@@ -62,6 +62,18 @@ class FakeDB:
 
     def all(self, sql, *params):
         sql_simple = " ".join(sql.split())
+        if sql_simple.startswith("SELECT id, flds FROM notes WHERE mid = ? AND flds LIKE ?"):
+            target_mid = params[0]
+            pattern = params[1]
+            if isinstance(pattern, bytes):
+                pattern = pattern.decode("utf-8", "ignore")
+            needle = pattern.replace("%", "")
+            needle = needle.replace("\\_", "_").replace("\\%", "%").replace("\\\\", "\\")
+            return [
+                (note.id, note.serialize_fields())
+                for note in self.collection.notes.values()
+                if note.mid == target_mid and needle in note.serialize_fields()
+            ]
         if sql_simple.startswith("SELECT id, flds FROM notes WHERE mid = ?"):
             target_mid = params[0]
             return [
@@ -446,6 +458,47 @@ def test_apply_updates_refreshes_existing_cache_when_creating_notes(manager, kan
 
     assert stats_second["created"] == 0
     assert len([note for note in collection.notes.values() if note["Character"] == "咥"]) == 1
+
+
+def test_apply_updates_fallback_prevents_duplicate_creation(manager, kanjicards_module, monkeypatch):
+    model = make_model()
+    existing_note = FakeNote(
+        1,
+        model,
+        initial={"Character": "蟲"},
+        tags=[],
+    )
+    collection = FakeCollection(model, notes=[existing_note])
+    cfg = make_config(kanjicards_module)
+    field_indexes = {"kanji": 0, "definition": 1, "stroke_count": 2, "kunyomi": 3, "onyomi": 4, "frequency": 5}
+    dictionary = {
+        "蟲": {
+            "definition": "insect; bug",
+            "stroke_count": 18,
+            "kunyomi": ["むし"],
+            "onyomi": ["チュウ"],
+            "frequency": 99,
+        },
+    }
+    monkeypatch.setattr(manager, "_resolve_deck_id", lambda *_: 1)
+
+    stats = manager._apply_kanji_updates(
+        collection,
+        ["蟲"],
+        dictionary,
+        model,
+        field_indexes,
+        field_indexes["kanji"],
+        cfg,
+        usage_info={},
+        existing_notes={},
+        prune_existing=False,
+    )
+
+    assert stats["created"] == 0
+    assert stats["existing_tagged"] == 1
+    assert len([note for note in collection.notes.values() if note["Character"] == "蟲"]) == 1
+    assert "existing" in existing_note.tags
 
 
 def test_apply_updates_skips_resuspending_reviewed_kanji(manager, kanjicards_module, monkeypatch):

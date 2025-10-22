@@ -2532,6 +2532,48 @@ class KanjiVocabRecalcManager:
                 mapping[value] = note_id
         return mapping
 
+    @staticmethod
+    def _escape_like_value(value: str) -> str:
+        escaped = value.replace("\\", "\\\\")
+        escaped = escaped.replace("%", "\\%")
+        return escaped.replace("_", "\\_")
+
+    def _find_existing_kanji_note(
+        self,
+        collection: Collection,
+        kanji_model: NotetypeDict,
+        kanji_field_index: int,
+        kanji_char: str,
+    ) -> Optional[int]:
+        if not kanji_char:
+            return None
+        model_id: Optional[int]
+        if isinstance(kanji_model, dict):
+            model_id = kanji_model.get("id")
+        else:
+            getter = getattr(kanji_model, "get", None)
+            if callable(getter):
+                model_id = getter("id")
+            else:
+                model_id = getattr(kanji_model, "id", None)
+        if not isinstance(model_id, int):
+            return None
+        pattern = f"%{self._escape_like_value(kanji_char)}%"
+        rows = _db_all(
+            collection,
+            "SELECT id, flds FROM notes WHERE mid = ? AND flds LIKE ? ESCAPE '\\\\'",
+            model_id,
+            pattern,
+            context="find_existing_kanji_note",
+        )
+        for note_id, flds in rows:
+            fields = flds.split("\x1f")
+            if kanji_field_index >= len(fields):
+                continue
+            if fields[kanji_field_index].strip() == kanji_char:
+                return note_id
+        return None
+
     def _get_existing_kanji_notes(
         self,
         collection: Collection,
@@ -3029,6 +3071,22 @@ class KanjiVocabRecalcManager:
                     scheduling_field_name = scheduling_name
 
         for kanji_char in unique_chars:
+            if kanji_char not in existing_notes:
+                fallback_note_id = self._find_existing_kanji_note(
+                    collection,
+                    kanji_model,
+                    kanji_field_index,
+                    kanji_char,
+                )
+                if fallback_note_id is not None:
+                    existing_notes[kanji_char] = fallback_note_id
+                    self._update_existing_notes_cache_entry(
+                        kanji_model,
+                        kanji_field_index,
+                        kanji_char,
+                        fallback_note_id,
+                    )
+
             dictionary_entry = dictionary.get(kanji_char)
             info = usage_info.get(kanji_char) if usage_info else None
             if kanji_char in existing_notes:
