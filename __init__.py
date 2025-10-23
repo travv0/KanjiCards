@@ -583,7 +583,7 @@ class KanjiVocabRecalcManager:
             dictionary_file=raw.get("dictionary_file", "kanjidic2.xml"),
             kanji_deck_name=raw.get("kanji_deck_name", ""),
             auto_run_on_sync=bool(raw.get("auto_run_on_sync", False)),
-            realtime_review=bool(raw.get("realtime_review", True)),
+            realtime_review=bool(raw.get("realtime_review", False)),
             unsuspended_tag=raw.get("unsuspended_tag", "kanjicards_unsuspended"),
             reorder_mode=raw.get("reorder_mode", "vocab"),
             ignore_suspended_vocab=bool(raw.get("ignore_suspended_vocab", False)),
@@ -684,8 +684,6 @@ class KanjiVocabRecalcManager:
             gui_hooks.reviewer_did_show_question.remove(self._on_reviewer_did_show_question)
         except (ValueError, AttributeError):
             pass
-        gui_hooks.reviewer_did_show_question.append(self._on_reviewer_did_show_question)
-        gui_hooks.reviewer_did_answer_card.append(self._on_reviewer_did_answer_card)
         toolbar_links_hook = getattr(gui_hooks, "top_toolbar_did_init_links", None)
         if toolbar_links_hook is not None:
             try:
@@ -3899,8 +3897,6 @@ class KanjiVocabRecalcSettingsDialog(QDialog):  # pragma: no cover
         self.unsuspend_tag_edit = QLineEdit(self.config.unsuspended_tag)
         self.deck_combo = QComboBox()
         self._populate_deck_combo()
-        self.realtime_check = QCheckBox("Update during reviews")
-        self.realtime_check.setChecked(self.config.realtime_review)
         self.known_interval_spin = QSpinBox()
         self.known_interval_spin.setRange(0, 3650)
         try:
@@ -3949,7 +3945,6 @@ class KanjiVocabRecalcSettingsDialog(QDialog):  # pragma: no cover
         form.addRow("Dictionary file", self.dictionary_edit)
         form.addRow("Unsuspended tag", self.unsuspend_tag_edit)
         form.addRow("Kanji deck", self.deck_combo)
-        form.addRow("", self.realtime_check)
         form.addRow("Known kanji interval (days)", self.known_interval_spin)
         form.addRow("", self.auto_sync_check)
         form.addRow("", self.ignore_suspended_check)
@@ -4220,7 +4215,6 @@ class KanjiVocabRecalcSettingsDialog(QDialog):  # pragma: no cover
         deck_name = self.deck_combo.currentData()
         self.config.kanji_deck_name = deck_name.strip() if isinstance(deck_name, str) else ""
         self.config.unsuspended_tag = self.unsuspend_tag_edit.text().strip()
-        self.config.realtime_review = self.realtime_check.isChecked()
         try:
             known_interval = int(self.known_interval_spin.value())
         except Exception:

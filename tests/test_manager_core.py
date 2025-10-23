@@ -176,8 +176,8 @@ def test_manager_init_wires_menu_and_hooks(manager_with_mw, kanjicards_module):
     labels = [action.label for action in mw.form.menuTools.actions]
     assert "KanjiCards Recalc" in labels
     assert "KanjiCards Settings" in labels
-    assert manager._on_reviewer_did_show_question in hooks.reviewer_did_show_question.callbacks
-    assert manager._on_reviewer_did_answer_card in hooks.reviewer_did_answer_card.callbacks
+    assert manager._on_reviewer_did_show_question not in hooks.reviewer_did_show_question.callbacks
+    assert manager._on_reviewer_did_answer_card not in hooks.reviewer_did_answer_card.callbacks
     assert manager._on_sync_event in hooks.sync_did_finish.callbacks or manager._on_sync_event in hooks.sync_will_start.callbacks
     assert kanjicards_module.__name__ in mw.addonManager.config_actions
 
