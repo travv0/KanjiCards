@@ -62,6 +62,14 @@ class FakeDB:
 
     def all(self, sql, *params):
         sql_simple = " ".join(sql.split())
+        if "SELECT id, flds FROM notes WHERE mid = ? AND instr(flds, ?) > 0" in sql_simple:
+            target_mid = params[0]
+            needle = params[1]
+            return [
+                (note.id, note.serialize_fields())
+                for note in self.collection.notes.values()
+                if note.mid == target_mid and needle in note.serialize_fields()
+            ]
         if sql_simple.startswith("SELECT id, flds FROM notes WHERE mid = ? AND flds LIKE ?"):
             target_mid = params[0]
             pattern = params[1]
@@ -244,6 +252,28 @@ def make_model():
             {"name": "Scheduling"},
         ],
     }
+
+
+def test_find_existing_kanji_note_uses_instr(monkeypatch, manager, kanjicards_module):
+    captured = {}
+
+    def fake_db_all(collection, sql, *params, context=""):
+        captured["sql"] = " ".join(sql.split())
+        captured["params"] = params
+        return [
+            (11, "%\x1fMeaning"),
+        ]
+
+    monkeypatch.setattr(kanjicards_module, "_db_all", fake_db_all)
+    note_id = manager._find_existing_kanji_note(
+        types.SimpleNamespace(),
+        {"id": 101, "flds": [{"name": "Character"}]},
+        0,
+        "%",
+    )
+    assert captured["sql"].endswith("instr(flds, ?) > 0")
+    assert captured["params"] == (101, "%")
+    assert note_id == 11
 
 
 def test_apply_updates_existing_note_unsuspends_and_tags(manager, kanjicards_module, monkeypatch):

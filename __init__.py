@@ -2532,12 +2532,6 @@ class KanjiVocabRecalcManager:
                 mapping[value] = note_id
         return mapping
 
-    @staticmethod
-    def _escape_like_value(value: str) -> str:
-        escaped = value.replace("\\", "\\\\")
-        escaped = escaped.replace("%", "\\%")
-        return escaped.replace("_", "\\_")
-
     def _find_existing_kanji_note(
         self,
         collection: Collection,
@@ -2558,12 +2552,11 @@ class KanjiVocabRecalcManager:
                 model_id = getattr(kanji_model, "id", None)
         if not isinstance(model_id, int):
             return None
-        pattern = f"%{self._escape_like_value(kanji_char)}%"
         rows = _db_all(
             collection,
-            "SELECT id, flds FROM notes WHERE mid = ? AND flds LIKE ? ESCAPE '\\\\'",
+            "SELECT id, flds FROM notes WHERE mid = ? AND instr(flds, ?) > 0",
             model_id,
-            pattern,
+            kanji_char,
             context="find_existing_kanji_note",
         )
         for note_id, flds in rows:
